@@ -493,19 +493,6 @@ func logTopNCandidates(groups []retinaOut, orig image.Rectangle, n int) {
 	}
 }
 
-// origHForStride derives the spatial H (== W for square maps) from
-// outputSize and stride.
-func origHForStride(g retinaOut) int {
-	if g.outputSize == 0 || g.stride == 0 {
-		return 0
-	}
-	// outputSize == H * W == H^2 for a square map.
-	hs := int(math.Sqrt(float64(g.outputSize)))
-	if hs*hs != g.outputSize {
-		return 0
-	}
-	return hs
-}
 func (g retinaOut) landmarkssafe() []float32 {
 	if g.landmarks == nil {
 		return nil
@@ -571,9 +558,9 @@ func writeAlignedBatchToTensor(aligned []*image.RGBA, dst *ort.Tensor[float32]) 
 				r8 := float32(pix[off])
 				g8 := float32(pix[off+1])
 				b8 := float32(pix[off+2])
-				tData[base+y*ArcFaceInputSize+x] = (b8/127.5) - 1.0
-				tData[base+ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (g8/127.5) - 1.0
-				tData[base+2*ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (r8/127.5) - 1.0
+				tData[base+y*ArcFaceInputSize+x] = (b8 / 127.5) - 1.0
+				tData[base+ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (g8 / 127.5) - 1.0
+				tData[base+2*ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (r8 / 127.5) - 1.0
 			}
 		}
 	}
@@ -615,7 +602,7 @@ func iou(a, b face) float32 {
 	areaA := (float64(a.X2) - float64(a.X1)) * (float64(a.Y2) - float64(a.Y1))
 	areaB := (float64(b.X2) - float64(b.X1)) * (float64(b.Y2) - float64(b.Y1))
 	return float32(inter / (areaA + areaB - inter))
-}// --- 5-point affine alignment to 112x112 ---
+} // --- 5-point affine alignment to 112x112 ---
 
 // alignFaceFromBox takes a decoded face and produces a 112×112 RGB
 // image that ArcFace can ingest.
@@ -931,9 +918,9 @@ func writeAlignedToTensor(src image.Image, dst *ort.Tensor[float32]) error {
 			r8 := float32(pix[off])   // R
 			g8 := float32(pix[off+1]) // G
 			b8 := float32(pix[off+2]) // B
-			tData[y*ArcFaceInputSize+x] = (b8/127.5) - 1.0
-			tData[stride+y*ArcFaceInputSize+x] = (g8/127.5) - 1.0
-			tData[2*stride+y*ArcFaceInputSize+x] = (r8/127.5) - 1.0
+			tData[y*ArcFaceInputSize+x] = (b8 / 127.5) - 1.0
+			tData[stride+y*ArcFaceInputSize+x] = (g8 / 127.5) - 1.0
+			tData[2*stride+y*ArcFaceInputSize+x] = (r8 / 127.5) - 1.0
 		}
 	}
 	return nil

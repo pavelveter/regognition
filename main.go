@@ -64,18 +64,18 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (embedder.Embedder, 
 		return embedder.NewStub(), "stub"
 	}
 	emb, err := embedder.NewONNX(cfg.DetectorModelPath, cfg.EmbedderModelPath, embedder.ONNXOptions{
-		LibPath:              cfg.OrtLibPath,
-		DetInputSize:         cfg.DetInputSize,
-		Workers:              cfg.Workers,
-		DetThreshold:         float32(cfg.DetThreshold),
-		NMSIoU:               float32(cfg.NMSIoU),
-		DetectorInputName:    cfg.DetectorInputName,
-		EmbedderInputName:    cfg.EmbedderInputName,
-		EmbedderOutputName:   cfg.EmbedderOutputName,
-		DetectorFormat:       cfg.DetectorFormat,
+		LibPath:               cfg.OrtLibPath,
+		DetInputSize:          cfg.DetInputSize,
+		Workers:               cfg.Workers,
+		DetThreshold:          float32(cfg.DetThreshold),
+		NMSIoU:                float32(cfg.NMSIoU),
+		DetectorInputName:     cfg.DetectorInputName,
+		EmbedderInputName:     cfg.EmbedderInputName,
+		EmbedderOutputName:    cfg.EmbedderOutputName,
+		DetectorFormat:        cfg.DetectorFormat,
 		LandmarkVarianceBaked: cfg.LandmarkVarianceBaked != nil && *cfg.LandmarkVarianceBaked,
-		UseCoreML:            cfg.CoreML,
-		ArcBatchSize:         cfg.ArcBatchSize,
+		UseCoreML:             cfg.CoreML,
+		ArcBatchSize:          cfg.ArcBatchSize,
 	})
 	if err != nil {
 		logger.Error("onnx embedder init failed, falling back to stub", "err", err)
@@ -241,6 +241,7 @@ func run() error {
 	// confusing than the slowdown. main.go owns this decision so
 	// cache.go stays a pure pass-through wrapper.
 	var fc cache.FaceCache
+	var bw *cache.BatchedWriter
 	if cfg.CachePath != "" && !cfg.Debug {
 		var err error
 		fc, err = cache.Open(cfg.CachePath)
@@ -248,6 +249,11 @@ func run() error {
 			return fmt.Errorf("cache open: %w", err)
 		}
 		emb = cache.NewCached(inner, fc, logger)
+		// Batched writer: buffer cache writes and flush in batches
+		// of 200 rows or every 1s, whichever comes first. This
+		// eliminates per-photo SQLite write-lock contention on fresh
+		// cache runs (8 workers no longer serialize on each INSERT).
+		bw = cache.NewBatchedWriter(fc, logger, 200, 1*time.Second)
 		logger.Info("embedding cache enabled", "path", cfg.CachePath)
 	} else if cfg.CachePath != "" && cfg.Debug {
 		logger.Warn("debug mode: bypassing embedding cache (debug crops require fresh inference)",
@@ -350,6 +356,7 @@ func run() error {
 		Embedder:          emb,
 		Persona:           pers,
 		Cache:             fc,
+		Writer:            bw,
 		DirSkip:           cfg.DirSkip,
 		Logger:            logger,
 		Stats:             stats,
@@ -363,6 +370,10 @@ func run() error {
 	// just pressed. The 3s budget is generous for a clean shutdown
 	// of N pooled sessions; on timeout we log and exit anyway.
 	defer func() {
+		// Flush any remaining batched cache writes before closing.
+		if bw != nil {
+			bw.Close()
+		}
 		closeDone := make(chan struct{})
 		go func() {
 			defer close(closeDone)

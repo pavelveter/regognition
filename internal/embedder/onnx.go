@@ -53,7 +53,7 @@ const (
 	AnchorsPerCell = 2 // retinaface_mnet025v2 always exports 2 anchors per cell
 
 	ArcFaceInputSize = 112
-	ArcFaceDim        = 512
+	ArcFaceDim       = 512
 )
 
 // arcFaceRef is the canonical 5-point ArcFace reference, mapped to a
@@ -119,8 +119,8 @@ type ONNXOptions struct {
 const (
 	DefaultDetInputSize = 640
 	DefaultWorkers      = 4
-	// 0.5 — SCRFD (det_500m.onnx) baseline. Override via INI /
-	// --detector-threshold.
+	// 0.5 — retinaface_mnet025_v2 / ResNet50 baseline. Override via
+	// INI / --detector-threshold.
 	DefaultDetThreshold = 0.5
 	DefaultNMSIoU       = 0.4
 	DefaultBaseNames    = "face_r8"
@@ -658,12 +658,6 @@ func splitConcatOutputs(sp *sessionPair, opts ONNXOptions) {
 	}
 }
 
-func destroyDetectorInputs(in *ort.Tensor[float32]) {
-	if in != nil {
-		in.Destroy()
-	}
-}
-
 func destroyDetector(s *ort.AdvancedSession, in *ort.Tensor[float32], outs []ort.Value) {
 	if s != nil {
 		s.Destroy()
@@ -804,7 +798,14 @@ func (e *ONNXEmbedder) extractWithDebug(ctx context.Context, img image.Image, sr
 		splitConcatOutputs(sp, e.opts)
 	}
 	// Debug: log top-10 scoring anchors before threshold/NMS.
-	logTopNCandidates(sp.detOuts, img.Bounds(), 10)
+	// Gated: building+sorting 16800 anchors is real CPU (reflection-
+	// based sort.Slice) and real allocation on EVERY image, including
+	// the non---debug Extract() path (which routes through this same
+	// function). Only pay for it when someone can actually see the
+	// output.
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		logTopNCandidates(sp.detOuts, img.Bounds(), 10)
+	}
 	// 3. decode + NMS.
 	faces := decodeRetinaFaces(sp.detOuts, img.Bounds(), e.opts.DetThreshold, e.opts.NMSIoU, e.opts.LandmarkVarianceBaked)
 	if len(faces) == 0 {

@@ -38,11 +38,22 @@ type FaceCache interface {
 	Get(ctx context.Context, key string) (hash string, faces [][]float32, ok bool, err error)
 	// Set writes/overwrites the (key, hash, faces) tuple.
 	Set(ctx context.Context, key string, hash string, faces [][]float32) error
+	// SetBatch writes/overwrites multiple tuples in a single transaction.
+	// If the underlying store doesn't support batching, it falls back to
+	// sequential Set calls.
+	SetBatch(ctx context.Context, items []BatchItem) error
 	// Has checks if the cache has an entry for key with matching hash.
 	// Returns the cached faces on hit, or (nil, false) on miss.
 	// Faster than Get when callers only need to check existence.
 	Has(ctx context.Context, key string, hash string) (faces [][]float32, ok bool, err error)
 	Close() error
+}
+
+// BatchItem is one entry for SetBatch.
+type BatchItem struct {
+	Path  string
+	Hash  string
+	Faces [][]float32
 }
 
 // sqliteCache is the modernc.org/sqlite-backed FaceCache.
@@ -157,6 +168,33 @@ func (s *sqliteCache) Has(ctx context.Context, key string, hash string) ([][]flo
 		return nil, false, err
 	}
 	return faces, true, nil
+}
+
+// SetBatch writes multiple items in a single transaction — amortises
+// commit overhead and eliminates per-photo write-lock contention.
+func (s *sqliteCache) SetBatch(ctx context.Context, items []BatchItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("cache: begin batch: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO photo_cache (path, hash, faces_count, embeddings) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("cache: prepare batch: %w", err)
+	}
+	defer stmt.Close()
+	for _, it := range items {
+		blob := encodeEmbeddings(it.Faces)
+		if _, err := stmt.ExecContext(ctx, it.Path, it.Hash, len(it.Faces), blob); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("cache: batch exec %q: %w", it.Path, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Close implements the FaceCache interface. Idempotent.

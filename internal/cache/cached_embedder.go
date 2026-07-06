@@ -16,7 +16,8 @@ import (
 // results transparently flow through a FaceCache:
 //   - on hit and matching hash → return cached faces;
 //   - on miss or stale hash     → inner.ExtractFile; if successful,
-//                                 write to cache (best-effort).
+//     write to cache (best-effort).
+//
 // Extract(image.Image) is never cached: there is no stable key, and
 // callers that hold an image.Image usually already have the original
 // path if they cared about caching.

@@ -16,10 +16,10 @@ import (
 // Carries the path, decoded image (or nil for cache hits/errors),
 // and any error from reading/decoding.
 type ImageJob struct {
-	Path     string
-	Img      image.Image  // nil if cache hit or error
+	Path       string
+	Img        image.Image // nil if cache hit or error
 	Embeddings [][]float32 // non-nil if cache hit (pre-computed embeddings)
-	Err      error        // non-nil if read/decode failed
+	Err        error       // non-nil if read/decode failed
 }
 
 // Prefetcher reads image files from disk in batches and sends
@@ -33,13 +33,13 @@ type ImageJob struct {
 // The Prefetcher also applies TargetDimension resize, avoiding
 // redundant work in workers.
 type Prefetcher struct {
-	paths       []string
-	batchSize   int
-	targetDim   int
-	outCh       chan ImageJob
-	decodeWorkers int // goroutines per batch for parallel decode
-	cache       cache.FaceCache // optional: skip I/O for cached images
-	logger      *slog.Logger
+	paths         []string
+	batchSize     int
+	targetDim     int
+	outCh         chan ImageJob
+	decodeWorkers int             // goroutines per batch for parallel decode
+	cache         cache.FaceCache // optional: skip I/O for cached images
+	logger        *slog.Logger
 }
 
 // NewPrefetcher creates a Prefetcher that will read paths in

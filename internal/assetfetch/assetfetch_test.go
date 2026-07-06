@@ -53,9 +53,9 @@ func TestEnsure_AlreadyValid(t *testing.T) {
 	defer srv.Close()
 
 	dl, err := Ensure(context.Background(), dst, srv.URL, Options{
-		MinBytes: 1024 * 1024,
-		Magic:    onnxHeader,
-		Logger:   newDiscardLogger(),
+		MinBytes:   1024 * 1024,
+		Magic:      onnxHeader,
+		Logger:     newDiscardLogger(),
 		HTTPClient: srv.Client(),
 	})
 	if err != nil {
@@ -84,9 +84,9 @@ func TestEnsure_DownloadAndAtomicRename(t *testing.T) {
 	defer srv.Close()
 
 	dl, err := Ensure(context.Background(), dst, srv.URL, Options{
-		MinBytes: 1024 * 1024,
-		Magic:    onnxHeader,
-		Logger:   newDiscardLogger(),
+		MinBytes:   1024 * 1024,
+		Magic:      onnxHeader,
+		Logger:     newDiscardLogger(),
 		HTTPClient: srv.Client(),
 	})
 	if err != nil {
@@ -122,9 +122,9 @@ func TestEnsure_MagicRejection(t *testing.T) {
 	defer srv.Close()
 
 	_, err := Ensure(context.Background(), dst, srv.URL, Options{
-		MinBytes: 1024 * 1024, // size check would fail too, but we want magic check first
-		Magic:    onnxHeader,
-		Logger:   newDiscardLogger(),
+		MinBytes:   1024 * 1024, // size check would fail too, but we want magic check first
+		Magic:      onnxHeader,
+		Logger:     newDiscardLogger(),
 		HTTPClient: srv.Client(),
 	})
 	if err == nil {
@@ -204,10 +204,10 @@ func TestEnsure_ContextCancelled(t *testing.T) {
 	}()
 
 	_, err := Ensure(ctx, dst, srv.URL, Options{
-		MinBytes: 1,
-		Magic:    onnxHeader,
-		Logger:   newDiscardLogger(),
-		Timeout:  5 * time.Second,
+		MinBytes:   1,
+		Magic:      onnxHeader,
+		Logger:     newDiscardLogger(),
+		Timeout:    5 * time.Second,
 		HTTPClient: srv.Client(),
 	})
 	if err == nil {
@@ -233,7 +233,7 @@ func TestEnsure_TmpLeftoverFromCrash(t *testing.T) {
 	if err := os.WriteFile(dst+".tmp", []byte("garbage from previous crash"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(dst+".tmp"); err != nil {
+	if _, err := os.Stat(dst + ".tmp"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,9 +245,9 @@ func TestEnsure_TmpLeftoverFromCrash(t *testing.T) {
 	defer srv.Close()
 
 	dl, err := Ensure(context.Background(), dst, srv.URL, Options{
-		MinBytes: 1024 * 1024,
-		Magic:    onnxHeader,
-		Logger:   newDiscardLogger(),
+		MinBytes:   1024 * 1024,
+		Magic:      onnxHeader,
+		Logger:     newDiscardLogger(),
 		HTTPClient: srv.Client(),
 	})
 	if err != nil || !dl {

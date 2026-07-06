@@ -58,9 +58,9 @@ type Config struct {
 	Workers         int     // ini: pipeline.workers         | flag: --workers
 	TargetDimension int     // ini: pipeline.target_dimension (max-edge cap; aspect ratio preserved)
 	Threshold       float64 // ini: pipeline.threshold       | flag: --threshold
-	DetInputSize int     // ini: pipeline.det_input_size
-	DetThreshold float64 // ini: pipeline.det_threshold
-	NMSIoU       float64 // ini: pipeline.nms_iou
+	DetInputSize    int     // ini: pipeline.det_input_size
+	DetThreshold    float64 // ini: pipeline.det_threshold
+	NMSIoU          float64 // ini: pipeline.nms_iou
 
 	// Cache (optional)
 	CachePath string // ini: pipeline.cache_path (empty -> NoopCache)
@@ -71,21 +71,24 @@ type Config struct {
 	Debug    bool   // ini: ui.debug     | flag: --debug     | default false
 }
 
+// boolPtr returns a pointer to b. Used for *bool config defaults.
+func boolPtr(b bool) *bool { return &b }
+
 // Defaults returns Config with built-in defaults for every field.
 func Defaults() Config {
 	return Config{
-		PersonaDir:        "persona",
-		SearchDir:         "./archive",
-		OutputDir:         "./finded",
-		Workers:           8,
+		PersonaDir: "persona",
+		SearchDir:  "./archive",
+		OutputDir:  "./finded",
+		Workers:    8,
 		// Max-edge cap for archive photos: portrait frames will be 1280 tall,
 		// landscape frames 1280 wide — aspect ratio is preserved by
 		// imaging.Fit inside pipeline.processJob.
 		TargetDimension: 1280,
 		Threshold:       0.55,
-		DetInputSize:      640,
-		DetThreshold:      0.5,
-		NMSIoU:            0.4,
+		DetInputSize:    640,
+		DetThreshold:    0.5,
+		NMSIoU:          0.4,
 		// Biubug6 Pytorch_Retinaface exports emit the canvas as the
 		// model's second graph input — PyTorch's ONNX exporter calls it
 		// "input.1" (the first slot usually holds the placeholder).
@@ -96,15 +99,20 @@ func Defaults() Config {
 		DetectorScoresName: "cls",
 		DetectorBoxesName:  "bbox",
 		DetectorLandmName:  "landm",
+		// MobileNet (the shipped retinaface_mnet025_v2 default)
+		// bakes variance[0] into landmark outputs; only ResNet50
+		// exports need this false. Override via
+		// [ml] landmark_variance_baked = false if you swap models.
+		LandmarkVarianceBaked: boolPtr(true),
 
-	// UI/logging defaults: emit everything by default ("debug" so
-	// the operator sees per-image activity during long runs) and let
-	// prettylog decide whether to colour by auto-detecting TTY.
-	// Debug is opt-in via --debug / [ui] debug = true; when set, it
-	// also turns on face-crop saving and bypasses the cache.
-	LogLevel: "info",
-	Color:    "auto",
-	Debug:    false,
+		// UI/logging defaults: emit everything by default ("debug" so
+		// the operator sees per-image activity during long runs) and let
+		// prettylog decide whether to colour by auto-detecting TTY.
+		// Debug is opt-in via --debug / [ui] debug = true; when set, it
+		// also turns on face-crop saving and bypasses the cache.
+		LogLevel: "info",
+		Color:    "auto",
+		Debug:    false,
 
 		// Default auto-download source: HuggingFace mirror of insightface's
 		// buffalo_s pack (det_500m.onnx + w600k_mbf.onnx, IR version 6).
@@ -127,28 +135,28 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	cfg := Defaults()
 
 	var (
-		cliConfigPath       = fs.String("config", "", "explicit INI file path (defaults to auto-search for config.ini next to the binary, then CWD)")
-		cliPersona          = fs.String("persona", "", "persona selfies directory")
-		cliSearch           = fs.String("search", "", "directory to scan for matches")
-		cliOutput           = fs.String("out", "", "directory to copy matched photos to")
-		cliDirSkip          = fs.String("dir-skip", "", "comma-separated folder names to skip during scan")
-		cliWorkers          = fs.Int("workers", 0, "number of pipeline workers")
-		cliThreshold        = fs.Float64("threshold", -1, "cosine distance threshold (matches are <= this)")
-		cliCache            = fs.String("cache", "", "sqlite cache path (empty disables cache)")
-		cliOrtLib           = fs.String("ort-lib", "", "path to libonnxruntime shared library (.dylib/.so/.dll)")
-		cliNoDownload       = fs.Bool("no-download", false, "disable auto-download of missing ONNX models on startup")
-		cliDetectorURL      = fs.String("detector-url", "", "URL the auto-downloader fetches the detector ONNX from")
-		cliEmbedderURL      = fs.String("embedder-url", "", "URL the auto-downloader fetches the recognizer ONNX from")
-		cliEmbedderOutput   = fs.String("embedder-output", "", "name of recognizer output tensor")
-		cliEmbedderInput    = fs.String("embedder-input", "", "name of recognizer input tensor")
-		cliDetectorScores   = fs.String("detector-scores", "", "suffix per-stride for detector score outputs")
-		cliDetectorBoxes    = fs.String("detector-boxes", "", "suffix per-stride for detector bbox outputs")
-		cliDetectorLandm    = fs.String("detector-landm", "", "suffix per-stride for detector landmark outputs")
-		cliLogLevel         = fs.String("log-level", "", "minimum log level: debug|info|warn|error (default 'debug'; 'error' = quiet)")
-		cliColor            = fs.String("color", "", "ANSI color usage: auto|always|never (default 'auto')")
-		cliDebug            = fs.Bool("debug", false, "debug mode: force DEBUG log level AND save 112×112 ArcFace-aligned face crops for every match into <out>/debug/, mirroring the search dir structure. Bypasses the embedding cache. Off by default.")
-		cliCoreML           = fs.Bool("coreml", false, "enable CoreML acceleration on macOS (Apple Neural Engine / GPU / CPU)")
-		cliArcBatchSize     = fs.Int("arc-batch-size", 0, "max faces per ArcFace inference call (0 = no batching)")
+		cliConfigPath     = fs.String("config", "", "explicit INI file path (defaults to auto-search for config.ini next to the binary, then CWD)")
+		cliPersona        = fs.String("persona", "", "persona selfies directory")
+		cliSearch         = fs.String("search", "", "directory to scan for matches")
+		cliOutput         = fs.String("out", "", "directory to copy matched photos to")
+		cliDirSkip        = fs.String("dir-skip", "", "comma-separated folder names to skip during scan")
+		cliWorkers        = fs.Int("workers", 0, "number of pipeline workers")
+		cliThreshold      = fs.Float64("threshold", -1, "cosine distance threshold (matches are <= this)")
+		cliCache          = fs.String("cache", "", "sqlite cache path (empty disables cache)")
+		cliOrtLib         = fs.String("ort-lib", "", "path to libonnxruntime shared library (.dylib/.so/.dll)")
+		cliNoDownload     = fs.Bool("no-download", false, "disable auto-download of missing ONNX models on startup")
+		cliDetectorURL    = fs.String("detector-url", "", "URL the auto-downloader fetches the detector ONNX from")
+		cliEmbedderURL    = fs.String("embedder-url", "", "URL the auto-downloader fetches the recognizer ONNX from")
+		cliEmbedderOutput = fs.String("embedder-output", "", "name of recognizer output tensor")
+		cliEmbedderInput  = fs.String("embedder-input", "", "name of recognizer input tensor")
+		cliDetectorScores = fs.String("detector-scores", "", "suffix per-stride for detector score outputs")
+		cliDetectorBoxes  = fs.String("detector-boxes", "", "suffix per-stride for detector bbox outputs")
+		cliDetectorLandm  = fs.String("detector-landm", "", "suffix per-stride for detector landmark outputs")
+		cliLogLevel       = fs.String("log-level", "", "minimum log level: debug|info|warn|error (default 'debug'; 'error' = quiet)")
+		cliColor          = fs.String("color", "", "ANSI color usage: auto|always|never (default 'auto')")
+		cliDebug          = fs.Bool("debug", false, "debug mode: force DEBUG log level AND save 112×112 ArcFace-aligned face crops for every match into <out>/debug/, mirroring the search dir structure. Bypasses the embedding cache. Off by default.")
+		cliCoreML         = fs.Bool("coreml", false, "enable CoreML acceleration on macOS (Apple Neural Engine / GPU / CPU)")
+		cliArcBatchSize   = fs.Int("arc-batch-size", 0, "max faces per ArcFace inference call (0 = no batching)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return nil, err

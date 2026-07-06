@@ -33,15 +33,15 @@ import (
 // ANSI escape codes — kept inline so the package has no extra
 // non-stdlib deps beyond golang.org/x/term (TTY detection).
 const (
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
-	ansiDim    = "\x1b[2m"
-	ansiRed    = "\x1b[31m"
-	ansiGreen  = "\x1b[32m"
-	ansiYellow = "\x1b[33m"
+	ansiReset   = "\x1b[0m"
+	ansiBold    = "\x1b[1m"
+	ansiDim     = "\x1b[2m"
+	ansiRed     = "\x1b[31m"
+	ansiGreen   = "\x1b[32m"
+	ansiYellow  = "\x1b[33m"
 	ansiMagenta = "\x1b[35m"
-	ansiCyan   = "\x1b[36m"
-	ansiGray   = "\x1b[90m"
+	ansiCyan    = "\x1b[36m"
+	ansiGray    = "\x1b[90m"
 )
 
 const timeFormat = "15:04:05"
@@ -61,10 +61,10 @@ var levelStyles = map[slog.Level]levelStyle{
 
 // Handler is the slog.Handler implementation.
 type Handler struct {
-	mu     sync.Mutex
-	w      io.Writer
-	level  slog.Level
-	color  bool
+	mu    sync.Mutex
+	w     io.Writer
+	level slog.Level
+	color bool
 
 	// Bound state from WithAttrs / WithGroup. Pre-bound attrs are
 	// emitted BEFORE the record's own attrs on every Handle call.

@@ -87,8 +87,9 @@ type Options struct {
 	Threshold         float32
 	Embedder          embedder.Embedder
 	Persona           *persona.Persona
-	Cache             cache.FaceCache // optional: for prefetch cache integration
-	DirSkip           string          // comma-separated folder names to skip
+	Cache             cache.FaceCache      // optional: for prefetch cache integration
+	Writer            *cache.BatchedWriter // optional: batched cache writer (replaces direct Cache.Set)
+	DirSkip           string               // comma-separated folder names to skip
 	Logger            *slog.Logger
 	Stats             *Stats
 	CopyFile          func(src, dst string) error
@@ -372,12 +373,17 @@ func processImageJob(ctx context.Context, job ImageJob, opt Options) Outcome {
 		return Outcome{Path: job.Path, Err: fmt.Errorf("extract: %w", err)}
 	}
 
-	// Store embeddings in cache for future runs (best-effort)
-	if opt.Cache != nil && len(faces) > 0 {
+	// Store embeddings in cache for future runs (best-effort).
+	// Use the batched writer if available; fall back to direct Set.
+	if len(faces) > 0 {
 		hash, hashErr := cache.HashFile(job.Path)
 		if hashErr == nil {
-			if cacheErr := opt.Cache.Set(ctx, job.Path, hash, faces); cacheErr != nil {
-				opt.Logger.Debug("cache: write failed", "path", job.Path, "err", cacheErr)
+			if opt.Writer != nil {
+				opt.Writer.Enqueue(job.Path, hash, faces)
+			} else if opt.Cache != nil {
+				if cacheErr := opt.Cache.Set(ctx, job.Path, hash, faces); cacheErr != nil {
+					opt.Logger.Debug("cache: write failed", "path", job.Path, "err", cacheErr)
+				}
 			}
 		}
 	}
