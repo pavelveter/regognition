@@ -1,0 +1,72 @@
+; regognition — sample configuration.
+;
+; Copy this file to ./config.ini and adjust as needed. Every section key
+; (and the flat root-section keys) can be overridden from the command line:
+;   --search /path/to/archive
+;   --out    /path/to/output
+;   --persona /path/to/selfies
+;   --workers 8
+;   --threshold 0.45
+;   --config  /custom/path/config.ini
+
+[paths]
+; Folder with 1+ selfies of the target person.
+persona_dir = persona
+; Archive folder that we scan for photos containing the target person.
+dir_search  = ./archive
+; Folder where matched photos are copied.
+dir_finded  = ./finded
+
+[ml]
+; ONNX models. When both files exist on disk AND ort_lib is set, main.go
+; automatically picks the ONNX embedder; otherwise it stays on the
+; deterministic stub.
+detector_model = ./models/retinaface_mnet025_v2.onnx
+embedder_model = ./models/arcface_r50_fp16.onnx
+; Path to the native ONNX Runtime shared library (binary is
+; platform-dependent). macOS arm64 example below is the v1.26.0 release
+; from https://github.com/microsoft/onnxruntime/releases.
+ort_lib       = ./models/libonnxruntime.dylib
+; auto_download: true → if detector_model / embedder_model are missing
+; at startup, main.go will fetch them from detector_model_url /
+; embedder_model_url (atomic .tmp→rename write, head-byte verification).
+; Use the --no-download CLI flag or auto_download = false for
+; air-gapped environments.
+auto_download = true
+; URL for auto-downloading the detector. Default is the HuggingFace
+; mirror of insightface buffalo_s/det_500m.onnx (RetinaFace MobileNet
+; v0.25, IR version 6, ~2.5 MB).
+detector_model_url = https://huggingface.co/deepghs/insightface/resolve/main/buffalo_s/det_500m.onnx
+; URL for auto-downloading the recognizer. Default is the HuggingFace
+; mirror of insightface buffalo_s/w600k_mbf.onnx (MobileFaceNet, IR
+; version 6, ~13.6 MB).
+embedder_model_url = https://huggingface.co/deepghs/insightface/resolve/main/buffalo_s/w600k_mbf.onnx
+
+[pipeline]
+; Number of workers for the channel-parallel archive processor.
+workers       = 4
+; Longest pre-processing edge. Portrait frames land with their longest
+; side at this value vertically; landscape frames with their longest
+; side at this value horizontally. Aspect ratio is preserved via
+; imaging.Fit. 1280 is a good balance of quality and CPU-inference
+; speed for most archives.
+target_dimension = 1280
+; Cosine distance threshold. A match is counted when dist <= threshold.
+; (L2-normalized ArcFace vectors: identity ~0.0, different people ~0.6+.)
+threshold     = 0.45
+; Face-detector parameters (RetinaFace) — active only in ONNX mode.
+det_input_size = 640
+det_threshold = 0.3
+nms_iou       = 0.4
+; Path to the SQLite embedding cache (comment out / leave empty to disable).
+; cache_path = ./cache.sqlite
+
+[ui]
+; Minimum log level: debug | info | warn | error. Default debug — the
+; program emits per-image events and per-batch progress every ~3 seconds
+; during the archive scan. Use --log-level=error (or log_level = error)
+; for quiet mode.
+log_level = debug
+; ANSI color usage: auto | always | never. Default auto (TTY autodetect
+; and respects $NO_COLOR per https://no-color.org/).
+;color = auto

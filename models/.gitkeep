@@ -1,0 +1,5 @@
+# Drop ONNX models here:
+#   ./models/retinaface_mnet025_v2.onnx
+#   ./models/arcface_r50_fp16.onnx
+#
+# The skeleton currently ignores them (uses a deterministic stub embedder).

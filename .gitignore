@@ -1,0 +1,91 @@
+# --- Build artifacts -----------------------------------------------
+# Compiled binary — produced by `go build -o ./regognition .`
+/regognition
+# Cross-compile output (Windows). Other names use `/regognition`.
+*.exe
+# Go test binaries (produced by `go test -c`)
+*.test
+# Coverage profiles and HTML reports
+coverage.out
+coverage.html
+*.coverprofile
+# pprof CPU / memory / goroutine / heap profiles
+*.prof
+# macOS debug-symbol bundles emitted next to the binary
+*.dSYM/
+# Vendored dependencies (created by `go mod vendor`)
+/vendor/
+# Multi-module workspace files (created by `go work init`)
+go.work
+go.work.sum
+# Delve debugger binaries
+__debug_*
+
+# --- Runtime state ------------------------------------------------
+# Output directory: matched photos are copied here by the pipeline
+/matched/
+# Embedding cache (SQLite + WAL-mode sidecars: -shm, -wal, -journal).
+# See internal/cache/face_cache.go for the schema; SQLite is opened
+# in WAL mode so on-disk files are cache.sqlite, cache.sqlite-wal
+# and cache.sqlite-shm. journal only appears after a crash recovery.
+cache.sqlite
+cache.sqlite-shm
+cache.sqlite-wal
+cache.sqlite-journal
+# regognition logs to stderr; any stray on-disk logs from earlier
+# experiments or side scripts would be picked up by `*.log` below.
+*.log
+
+# --- ONNX models (auto-downloaded on first run) -------------------
+# Detector + recognizer weights and the ORT native library.
+# Fetched via internal/assetfetch (see [ml] section in config.ini
+# for the URLs). Large binary blobs — never commit.
+/models/*.onnx
+/models/libonnxruntime.dylib
+/models/libonnxruntime.so
+/models/libonnxruntime.dll
+
+# --- User data -----------------------------------------------------
+# Persona selfies and archive root — user data, not project source.
+/persona/
+/archive/
+
+# --- Local configuration ------------------------------------------
+# config.ini holds machine-specific paths (ORT lib, archive dirs).
+# Commit config.ini.example instead — config.ini is auto-derived
+# from it by config.LocateConfig when --config is not passed.
+/config.ini
+
+# --- OS noise -----------------------------------------------------
+# macOS Finder metadata
+.DS_Store
+# Windows thumbnail cache
+Thumbs.db
+# Windows desktop entry
+desktop.ini
+# JPEGs
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.webp
+
+# --- Glued text files ---------------------------------------------
+out.txt
+
+# --- Editor / IDE scratch -----------------------------------------
+# Vim swap files
+*.swp
+*.swo
+*~
+# VS Code workspace
+.vscode/
+# JetBrains / IntelliJ
+.idea/
+# Emacs autosave / lock files
+\#*\#
+.\#*
+# Git merge backups (from `git merge` / `git revert`)
+*.orig
+*.rej
