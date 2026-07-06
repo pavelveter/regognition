@@ -58,6 +58,14 @@ type Persona struct {
 // nothing" signal). The sink fires per face per selfie but does NOT
 // affect the returned embeddings — debug is observability-only.
 func Load(ctx context.Context, dir string, emb embedder.Embedder, sink embedder.DebugSink) (*Persona, error) {
+	return LoadWithLogger(ctx, dir, emb, sink, nil)
+}
+
+// LoadWithLogger is like Load but accepts an explicit logger.
+func LoadWithLogger(ctx context.Context, dir string, emb embedder.Embedder, sink embedder.DebugSink, logger *slog.Logger) (*Persona, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if dir == "" {
 		return nil, errors.New("persona: empty directory")
 	}
@@ -87,7 +95,7 @@ func Load(ctx context.Context, dir string, emb embedder.Embedder, sink embedder.
 		if sink != nil {
 			img, openErr := imaging.Open(sp, imaging.AutoOrientation(true))
 			if openErr != nil {
-				slog.Default().Debug("selfie open failed", "path", sp, "err", openErr)
+				logger.Warn("selfie open failed", "path", sp, "err", openErr)
 				p.Skipped = append(p.Skipped, sp)
 				continue
 			}
@@ -99,24 +107,17 @@ func Load(ctx context.Context, dir string, emb embedder.Embedder, sink embedder.
 			// Per-selfie failure is non-fatal; pipeline-level zero-embeddings
 			// check below catches systemic problems. The failed path is
 			// recorded so the caller can warn the user.
-			slog.Default().Debug("selfie extract failed", "path", sp, "err", extractErr)
+			logger.Warn("selfie extract failed", "path", sp, "err", extractErr)
 			p.Skipped = append(p.Skipped, sp)
 			continue
 		}
-		slog.Default().Debug("selfie extract done", "path", sp, "faces", len(faces))
+		logger.Debug("selfie extract done", "path", sp, "faces", len(faces))
 		p.Selfies = append(p.Selfies, sp)
 		p.Embeddings = append(p.Embeddings, faces...)
 	}
 
 	if len(p.Embeddings) == 0 {
-		// Don't fail: the empty-persona case is operator-actionable
-		// (look at the "selfie extract failed" Debug lines + Skipped
-		// paths surfaced at INFO), not a panic. Returning a valid
-		// (empty) Persona lets the caller log a clear warning and
-		// gracefully no-op the archive stage instead of dying with
-		// regognition: exit status 1 and a "persona load: ..." chain
-		// that's harder to triage.
-		slog.Default().Warn("persona: extracted 0 face embeddings",
+		logger.Warn("persona: extracted 0 face embeddings",
 			"selfies", len(paths),
 			"dir", dir,
 			"skipped", len(p.Skipped),

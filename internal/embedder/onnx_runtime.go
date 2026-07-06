@@ -16,6 +16,14 @@ import (
 	ort "github.com/yalue/onnxruntime_go"
 )
 
+// resizePool reuses 640×640 RGBA buffers for detector preprocessing.
+// Each buffer is ~1.6 MB; the pool prevents one allocation per image.
+var resizePool = sync.Pool{
+	New: func() any {
+		return image.NewRGBA(image.Rect(0, 0, 640, 640))
+	},
+}
+
 // --- Detector preprocessing ---
 
 // minFacePx is the minimum bounding-box dimension (in original image
@@ -38,7 +46,13 @@ func preprocessRetinaFace(src image.Image, size int, dst *ort.Tensor[float32]) e
 	if src.Bounds().Empty() {
 		return errors.New("preprocess: empty image bounds")
 	}
-	resized := resizeBilinear(size, size, src)
+	// Get a pooled buffer for the resized image
+	var resized *image.RGBA
+	if size == 640 {
+		resized = resizePool.Get().(*image.RGBA)
+		defer resizePool.Put(resized)
+	}
+	resized = resizeBilinear(size, size, src, resized)
 	b := resized.Bounds()
 	if b.Dx() != size || b.Dy() != size {
 		return errors.New("preprocess: resize produced unexpected shape")
@@ -47,13 +61,15 @@ func preprocessRetinaFace(src image.Image, size int, dst *ort.Tensor[float32]) e
 	if len(tData) != 3*size*size {
 		return errors.New("preprocess: tensor buffer size mismatch")
 	}
+	// Direct Pix access — resizeBilinear always returns *image.RGBA
+	pix := resized.Pix
 	stride := size * size
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
-			r, g, blu, _ := resized.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			r8 := float32(r >> 8)
-			g8 := float32(g >> 8)
-			b8 := float32(blu >> 8)
+			off := (y*resized.Stride + x*4)
+			b8 := float32(pix[off+2]) // B
+			g8 := float32(pix[off+1]) // G
+			r8 := float32(pix[off])   // R
 			tData[y*size+x] = b8 - detectMean[0]
 			tData[stride+y*size+x] = g8 - detectMean[1]
 			tData[2*stride+y*size+x] = r8 - detectMean[2]
@@ -63,68 +79,178 @@ func preprocessRetinaFace(src image.Image, size int, dst *ort.Tensor[float32]) e
 }
 
 // resizeBilinear is a minimal bilinear resampler; avoids pulling
-// extra dependencies for one square-resize use site.
-func resizeBilinear(dstW, dstH int, src image.Image) image.Image {
+// extra dependencies for one square-resize use site. If out is nil,
+// a new image.RGBA is allocated; otherwise out is reused (must match
+// dstW×dstH). Uses type-switch for direct Pix access when possible.
+func resizeBilinear(dstW, dstH int, src image.Image, out *image.RGBA) *image.RGBA {
 	srcBounds := src.Bounds()
 	srcW, srcH := srcBounds.Dx(), srcBounds.Dy()
 	if srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0 {
-		return image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+		if out == nil {
+			return image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+		}
+		return out
 	}
-	out := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	if out == nil {
+		out = image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	}
 	scaleX := float64(srcW) / float64(dstW)
 	scaleY := float64(srcH) / float64(dstH)
-	for y := 0; y < dstH; y++ {
-		sy := (float64(y)+0.5)*scaleY - 0.5
-		sy0 := int(math.Floor(sy))
-		fy := sy - float64(sy0)
-		if sy0 < 0 {
-			sy0 = 0
-		}
-		if sy0 >= srcH-1 {
-			sy0 = srcH - 2
-			if sy0 < 0 {
-				sy0 = 0
-			}
-			fy = 0
-		}
-		for x := 0; x < dstW; x++ {
-			sx := (float64(x)+0.5)*scaleX - 0.5
-			sx0 := int(math.Floor(sx))
-			fx := sx - float64(sx0)
-			if sx0 < 0 {
-				sx0 = 0
-			}
-			if sx0 >= srcW-1 {
-				sx0 = srcW - 2
-				if sx0 < 0 {
-					sx0 = 0
-				}
-				fx = 0
-			}
-			r00, g00, b00, _ := src.At(srcBounds.Min.X+sx0, srcBounds.Min.Y+sy0).RGBA()
-			r01, g01, b01, _ := src.At(srcBounds.Min.X+sx0+1, srcBounds.Min.Y+sy0).RGBA()
-			r10, g10, b10, _ := src.At(srcBounds.Min.X+sx0, srcBounds.Min.Y+sy0+1).RGBA()
-			r11, g11, b11, _ := src.At(srcBounds.Min.X+sx0+1, srcBounds.Min.Y+sy0+1).RGBA()
 
-			r0 := lerp(float64(r00), float64(r01), fx)
-			r1 := lerp(float64(r10), float64(r11), fx)
-			g0 := lerp(float64(g00), float64(g01), fx)
-			g1 := lerp(float64(g10), float64(g11), fx)
-			b0 := lerp(float64(b00), float64(b01), fx)
-			b1 := lerp(float64(b10), float64(b11), fx)
-
-			R := uint16(clampUint16(lerp(r0, r1, fy)))
-			G := uint16(clampUint16(lerp(g0, g1, fy)))
-			B := uint16(clampUint16(lerp(b0, b1, fy)))
-
-			off := (y*dstW + x) * 4
-			out.Pix[off+0] = uint8(R >> 8)
-			out.Pix[off+1] = uint8(G >> 8)
-			out.Pix[off+2] = uint8(B >> 8)
-			out.Pix[off+3] = 0xff
-		}
+	// Type-switch for direct Pix access — avoids interface dispatch per pixel
+	switch v := src.(type) {
+	case *image.RGBA:
+		resizeRGBADirect(v, out, srcBounds, scaleX, scaleY, dstW, dstH)
+	case *image.NRGBA:
+		resizeNRGBADirect(v, out, srcBounds, scaleX, scaleY, dstW, dstH)
+	case *image.YCbCr:
+		resizeYCbCrDirect(v, out, srcBounds, scaleX, scaleY, dstW, dstH)
+	default:
+		resizeGenericDirect(src, out, srcBounds, scaleX, scaleY, dstW, dstH)
 	}
 	return out
+}
+
+// resizeRGBADirect resizes with direct Pix access for *image.RGBA source.
+func resizeRGBADirect(src *image.RGBA, out *image.RGBA, srcBounds image.Rectangle, scaleX, scaleY float64, dstW, dstH int) {
+	srcPix := src.Pix
+	srcStride := src.Stride
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < dstH; y++ {
+		sy := (float64(y)+0.5)*scaleY - 0.5
+		sy0 := clampInt(int(math.Floor(sy)), 0, srcBounds.Dy()-2)
+		fy := sy - float64(sy0)
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*scaleX - 0.5
+			sx0 := clampInt(int(math.Floor(sx)), 0, srcBounds.Dx()-2)
+			fx := sx - float64(sx0)
+			sy0a := srcBounds.Min.Y + sy0
+			sx0a := srcBounds.Min.X + sx0
+			off00 := sy0a*srcStride + sx0a*4
+			off01 := off00 + 4
+			off10 := off00 + srcStride
+			off11 := off10 + 4
+			// Pix stores 8-bit values; multiply by 257 to match RGBA() premultiplied 16-bit
+			r := lerp(lerp(float64(srcPix[off00])*257, float64(srcPix[off01])*257, fx),
+				lerp(float64(srcPix[off10])*257, float64(srcPix[off11])*257, fx), fy)
+			g := lerp(lerp(float64(srcPix[off00+1])*257, float64(srcPix[off01+1])*257, fx),
+				lerp(float64(srcPix[off10+1])*257, float64(srcPix[off11+1])*257, fx), fy)
+			b := lerp(lerp(float64(srcPix[off00+2])*257, float64(srcPix[off01+2])*257, fx),
+				lerp(float64(srcPix[off10+2])*257, float64(srcPix[off11+2])*257, fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(b) / 256)
+			outPix[outOff+3] = 0xff
+		}
+	}
+}
+
+// resizeNRGBADirect resizes with direct Pix access for *image.NRGBA source.
+func resizeNRGBADirect(src *image.NRGBA, out *image.RGBA, srcBounds image.Rectangle, scaleX, scaleY float64, dstW, dstH int) {
+	srcPix := src.Pix
+	srcStride := src.Stride
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < dstH; y++ {
+		sy := (float64(y)+0.5)*scaleY - 0.5
+		sy0 := clampInt(int(math.Floor(sy)), 0, srcBounds.Dy()-2)
+		fy := sy - float64(sy0)
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*scaleX - 0.5
+			sx0 := clampInt(int(math.Floor(sx)), 0, srcBounds.Dx()-2)
+			fx := sx - float64(sx0)
+			sy0a := srcBounds.Min.Y + sy0
+			sx0a := srcBounds.Min.X + sx0
+			off00 := sy0a*srcStride + sx0a*4
+			off01 := off00 + 4
+			off10 := off00 + srcStride
+			off11 := off10 + 4
+			// Pix stores 8-bit values; multiply by 257 to match RGBA() premultiplied 16-bit
+			r := lerp(lerp(float64(srcPix[off00])*257, float64(srcPix[off01])*257, fx),
+				lerp(float64(srcPix[off10])*257, float64(srcPix[off11])*257, fx), fy)
+			g := lerp(lerp(float64(srcPix[off00+1])*257, float64(srcPix[off01+1])*257, fx),
+				lerp(float64(srcPix[off10+1])*257, float64(srcPix[off11+1])*257, fx), fy)
+			b := lerp(lerp(float64(srcPix[off00+2])*257, float64(srcPix[off01+2])*257, fx),
+				lerp(float64(srcPix[off10+2])*257, float64(srcPix[off11+2])*257, fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(b) / 256)
+			outPix[outOff+3] = 0xff
+		}
+	}
+}
+
+// resizeYCbCrDirect resizes with direct Pix access for *image.YCbCr source.
+func resizeYCbCrDirect(src *image.YCbCr, out *image.RGBA, srcBounds image.Rectangle, scaleX, scaleY float64, dstW, dstH int) {
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < dstH; y++ {
+		sy := (float64(y)+0.5)*scaleY - 0.5
+		sy0 := clampInt(int(math.Floor(sy)), 0, srcBounds.Dy()-2)
+		fy := sy - float64(sy0)
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*scaleX - 0.5
+			sx0 := clampInt(int(math.Floor(sx)), 0, srcBounds.Dx()-2)
+			fx := sx - float64(sx0)
+			sy0a := srcBounds.Min.Y + sy0
+			sx0a := srcBounds.Min.X + sx0
+			r00, g00, b00, _ := src.At(sx0a, sy0a).RGBA()
+			r01, g01, b01, _ := src.At(sx0a+1, sy0a).RGBA()
+			r10, g10, b10, _ := src.At(sx0a, sy0a+1).RGBA()
+			r11, g11, b11, _ := src.At(sx0a+1, sy0a+1).RGBA()
+			r := lerp(lerp(float64(r00), float64(r01), fx), lerp(float64(r10), float64(r11), fx), fy)
+			g := lerp(lerp(float64(g00), float64(g01), fx), lerp(float64(g10), float64(g11), fx), fy)
+			b := lerp(lerp(float64(b00), float64(b01), fx), lerp(float64(b10), float64(b11), fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(b) / 256)
+			outPix[outOff+3] = 0xff
+		}
+	}
+}
+
+// resizeGenericDirect is the fallback for unknown image types.
+func resizeGenericDirect(src image.Image, out *image.RGBA, srcBounds image.Rectangle, scaleX, scaleY float64, dstW, dstH int) {
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < dstH; y++ {
+		sy := (float64(y)+0.5)*scaleY - 0.5
+		sy0 := clampInt(int(math.Floor(sy)), 0, srcBounds.Dy()-2)
+		fy := sy - float64(sy0)
+		for x := 0; x < dstW; x++ {
+			sx := (float64(x)+0.5)*scaleX - 0.5
+			sx0 := clampInt(int(math.Floor(sx)), 0, srcBounds.Dx()-2)
+			fx := sx - float64(sx0)
+			sy0a := srcBounds.Min.Y + sy0
+			sx0a := srcBounds.Min.X + sx0
+			r00, g00, b00, _ := src.At(sx0a, sy0a).RGBA()
+			r01, g01, b01, _ := src.At(sx0a+1, sy0a).RGBA()
+			r10, g10, b10, _ := src.At(sx0a, sy0a+1).RGBA()
+			r11, g11, b11, _ := src.At(sx0a+1, sy0a+1).RGBA()
+			r := lerp(lerp(float64(r00), float64(r01), fx), lerp(float64(r10), float64(r11), fx), fy)
+			g := lerp(lerp(float64(g00), float64(g01), fx), lerp(float64(g10), float64(g11), fx), fy)
+			b := lerp(lerp(float64(b00), float64(b01), fx), lerp(float64(b10), float64(b11), fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(b) / 256)
+			outPix[outOff+3] = 0xff
+		}
+	}
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func lerp(a, b, t float64) float64 { return a*(1-t) + b*t }
@@ -421,6 +547,39 @@ func landmarksInBBox(lm [5][2]float32, x1, y1, x2, y2 float32) bool {
 	return true
 }
 
+// writeAlignedBatchToTensor packs multiple 112x112 aligned faces into a
+// batched ArcFace input tensor [batchSize, 3, 112, 112] in BGR order.
+// Returns the number of faces actually written (may be < len(aligned)
+// if the tensor is full).
+func writeAlignedBatchToTensor(aligned []*image.RGBA, dst *ort.Tensor[float32]) int {
+	if dst == nil || len(aligned) == 0 {
+		return 0
+	}
+	tData := dst.GetData()
+	batchSz := len(tData) / (3 * ArcFaceInputSize * ArcFaceInputSize)
+	if batchSz > len(aligned) {
+		batchSz = len(aligned)
+	}
+	channels := 3 * ArcFaceInputSize * ArcFaceInputSize
+	for i := 0; i < batchSz; i++ {
+		rgba := aligned[i]
+		pix := rgba.Pix
+		base := i * channels
+		for y := 0; y < ArcFaceInputSize; y++ {
+			for x := 0; x < ArcFaceInputSize; x++ {
+				off := (y*rgba.Stride + x*4)
+				r8 := float32(pix[off])
+				g8 := float32(pix[off+1])
+				b8 := float32(pix[off+2])
+				tData[base+y*ArcFaceInputSize+x] = (b8/127.5) - 1.0
+				tData[base+ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (g8/127.5) - 1.0
+				tData[base+2*ArcFaceInputSize*ArcFaceInputSize+y*ArcFaceInputSize+x] = (r8/127.5) - 1.0
+			}
+		}
+	}
+	return batchSz
+}
+
 // nmsFaces sorts by score and removes IoU-overlapping lower-scored
 // boxes; returns the survivors.
 func nmsFaces(in []face, iouThr float32) []face {
@@ -492,6 +651,7 @@ func alignFaceFromBox(src image.Image, f face) (*image.RGBA, error) {
 // alignFaceTo112 solves the 2x3 affine matrix mapping srcPts (in
 // original image coordinates) to arcFaceRef (canonical 112x112) and
 // bilinearly samples into a fresh 112x112 RGB image.
+// Uses type-switch for direct Pix access when possible.
 func alignFaceTo112(src image.Image, srcPts [5][2]float32) (*image.RGBA, error) {
 	if src.Bounds().Empty() {
 		return nil, errors.New("align: empty source image")
@@ -507,48 +667,149 @@ func alignFaceTo112(src image.Image, srcPts [5][2]float32) (*image.RGBA, error) 
 	}
 	invDet := 1.0 / det
 	srcBounds := src.Bounds()
-	for y := 0; y < ArcFaceInputSize; y++ {
-		for x := 0; x < ArcFaceInputSize; x++ {
-			sx := (e*(float64(x)-c) - b*(float64(y)-f)) * invDet
-			sy := (-d*(float64(x)-c) + a*(float64(y)-f)) * invDet
-			r, g, blu := bilinearSampleRGBA(src, srcBounds, sx, sy)
-			off := (y*ArcFaceInputSize + x) * 4
-			out.Pix[off+0] = r
-			out.Pix[off+1] = g
-			out.Pix[off+2] = blu
-			out.Pix[off+3] = 0xff
-		}
+
+	// Type-switch for direct Pix access — avoids interface dispatch per pixel
+	switch v := src.(type) {
+	case *image.RGBA:
+		alignFaceRGBADirect(v, out, srcBounds, a, b, c, d, e, f, invDet)
+	case *image.NRGBA:
+		alignFaceNRGBADirect(v, out, srcBounds, a, b, c, d, e, f, invDet)
+	case *image.YCbCr:
+		alignFaceYCbCrDirect(v, out, srcBounds, a, b, c, d, e, f, invDet)
+	default:
+		alignFaceGenericDirect(src, out, srcBounds, a, b, c, d, e, f, invDet)
 	}
 	return out, nil
 }
 
-func bilinearSampleRGBA(src image.Image, bounds image.Rectangle, x, y float64) (uint8, uint8, uint8) {
-	x0 := int(math.Floor(x))
-	y0 := int(math.Floor(y))
-	if x0 < bounds.Min.X {
-		x0 = bounds.Min.X
+// alignFaceRGBADirect aligns with direct Pix access for *image.RGBA source.
+func alignFaceRGBADirect(src *image.RGBA, out *image.RGBA, srcBounds image.Rectangle, a, b, c, d, e, f, invDet float64) {
+	srcPix := src.Pix
+	srcStride := src.Stride
+	outPix := out.Pix
+	outStride := out.Stride
+	minX := float64(srcBounds.Min.X)
+	minY := float64(srcBounds.Min.Y)
+	maxX := float64(srcBounds.Max.X - 2)
+	maxY := float64(srcBounds.Max.Y - 2)
+	for y := 0; y < ArcFaceInputSize; y++ {
+		for x := 0; x < ArcFaceInputSize; x++ {
+			sx := (e*(float64(x)-c) - b*(float64(y)-f)) * invDet
+			sy := (-d*(float64(x)-c) + a*(float64(y)-f)) * invDet
+			x0 := clampInt(int(math.Floor(sx)), int(minX), int(maxX))
+			y0 := clampInt(int(math.Floor(sy)), int(minY), int(maxY))
+			fx := sx - float64(x0)
+			fy := sy - float64(y0)
+			off00 := y0*srcStride + x0*4
+			off01 := off00 + 4
+			off10 := off00 + srcStride
+			off11 := off10 + 4
+			r := lerp(lerp(float64(srcPix[off00])*257, float64(srcPix[off01])*257, fx),
+				lerp(float64(srcPix[off10])*257, float64(srcPix[off11])*257, fx), fy)
+			g := lerp(lerp(float64(srcPix[off00+1])*257, float64(srcPix[off01+1])*257, fx),
+				lerp(float64(srcPix[off10+1])*257, float64(srcPix[off11+1])*257, fx), fy)
+			bv := lerp(lerp(float64(srcPix[off00+2])*257, float64(srcPix[off01+2])*257, fx),
+				lerp(float64(srcPix[off10+2])*257, float64(srcPix[off11+2])*257, fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(bv) / 256)
+			outPix[outOff+3] = 0xff
+		}
 	}
-	if y0 < bounds.Min.Y {
-		y0 = bounds.Min.Y
+}
+
+// alignFaceNRGBADirect aligns with direct Pix access for *image.NRGBA source.
+func alignFaceNRGBADirect(src *image.NRGBA, out *image.RGBA, srcBounds image.Rectangle, a, b, c, d, e, f, invDet float64) {
+	srcPix := src.Pix
+	srcStride := src.Stride
+	outPix := out.Pix
+	outStride := out.Stride
+	minX := float64(srcBounds.Min.X)
+	minY := float64(srcBounds.Min.Y)
+	maxX := float64(srcBounds.Max.X - 2)
+	maxY := float64(srcBounds.Max.Y - 2)
+	for y := 0; y < ArcFaceInputSize; y++ {
+		for x := 0; x < ArcFaceInputSize; x++ {
+			sx := (e*(float64(x)-c) - b*(float64(y)-f)) * invDet
+			sy := (-d*(float64(x)-c) + a*(float64(y)-f)) * invDet
+			x0 := clampInt(int(math.Floor(sx)), int(minX), int(maxX))
+			y0 := clampInt(int(math.Floor(sy)), int(minY), int(maxY))
+			fx := sx - float64(x0)
+			fy := sy - float64(y0)
+			off00 := y0*srcStride + x0*4
+			off01 := off00 + 4
+			off10 := off00 + srcStride
+			off11 := off10 + 4
+			r := lerp(lerp(float64(srcPix[off00])*257, float64(srcPix[off01])*257, fx),
+				lerp(float64(srcPix[off10])*257, float64(srcPix[off11])*257, fx), fy)
+			g := lerp(lerp(float64(srcPix[off00+1])*257, float64(srcPix[off01+1])*257, fx),
+				lerp(float64(srcPix[off10+1])*257, float64(srcPix[off11+1])*257, fx), fy)
+			bv := lerp(lerp(float64(srcPix[off00+2])*257, float64(srcPix[off01+2])*257, fx),
+				lerp(float64(srcPix[off10+2])*257, float64(srcPix[off11+2])*257, fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(bv) / 256)
+			outPix[outOff+3] = 0xff
+		}
 	}
-	x1 := x0 + 1
-	y1 := y0 + 1
-	if x1 > bounds.Max.X-1 {
-		x1 = bounds.Max.X - 1
+}
+
+// alignFaceYCbCrDirect aligns with At() for *image.YCbCr source.
+func alignFaceYCbCrDirect(src *image.YCbCr, out *image.RGBA, srcBounds image.Rectangle, a, b, c, d, e, f, invDet float64) {
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < ArcFaceInputSize; y++ {
+		for x := 0; x < ArcFaceInputSize; x++ {
+			sx := (e*(float64(x)-c) - b*(float64(y)-f)) * invDet
+			sy := (-d*(float64(x)-c) + a*(float64(y)-f)) * invDet
+			x0 := clampInt(int(math.Floor(sx)), srcBounds.Min.X, srcBounds.Max.X-2)
+			y0 := clampInt(int(math.Floor(sy)), srcBounds.Min.Y, srcBounds.Max.Y-2)
+			fx := sx - float64(x0)
+			fy := sy - float64(y0)
+			r00, g00, b00, _ := src.At(x0, y0).RGBA()
+			r01, g01, b01, _ := src.At(x0+1, y0).RGBA()
+			r10, g10, b10, _ := src.At(x0, y0+1).RGBA()
+			r11, g11, b11, _ := src.At(x0+1, y0+1).RGBA()
+			r := lerp(lerp(float64(r00), float64(r01), fx), lerp(float64(r10), float64(r11), fx), fy)
+			g := lerp(lerp(float64(g00), float64(g01), fx), lerp(float64(g10), float64(g11), fx), fy)
+			bv := lerp(lerp(float64(b00), float64(b01), fx), lerp(float64(b10), float64(b11), fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(bv) / 256)
+			outPix[outOff+3] = 0xff
+		}
 	}
-	if y1 > bounds.Max.Y-1 {
-		y1 = bounds.Max.Y - 1
+}
+
+// alignFaceGenericDirect is the fallback for unknown image types.
+func alignFaceGenericDirect(src image.Image, out *image.RGBA, srcBounds image.Rectangle, a, b, c, d, e, f, invDet float64) {
+	outPix := out.Pix
+	outStride := out.Stride
+	for y := 0; y < ArcFaceInputSize; y++ {
+		for x := 0; x < ArcFaceInputSize; x++ {
+			sx := (e*(float64(x)-c) - b*(float64(y)-f)) * invDet
+			sy := (-d*(float64(x)-c) + a*(float64(y)-f)) * invDet
+			x0 := clampInt(int(math.Floor(sx)), srcBounds.Min.X, srcBounds.Max.X-2)
+			y0 := clampInt(int(math.Floor(sy)), srcBounds.Min.Y, srcBounds.Max.Y-2)
+			fx := sx - float64(x0)
+			fy := sy - float64(y0)
+			r00, g00, b00, _ := src.At(x0, y0).RGBA()
+			r01, g01, b01, _ := src.At(x0+1, y0).RGBA()
+			r10, g10, b10, _ := src.At(x0, y0+1).RGBA()
+			r11, g11, b11, _ := src.At(x0+1, y0+1).RGBA()
+			r := lerp(lerp(float64(r00), float64(r01), fx), lerp(float64(r10), float64(r11), fx), fy)
+			g := lerp(lerp(float64(g00), float64(g01), fx), lerp(float64(g10), float64(g11), fx), fy)
+			bv := lerp(lerp(float64(b00), float64(b01), fx), lerp(float64(b10), float64(b11), fx), fy)
+			outOff := y*outStride + x*4
+			outPix[outOff] = uint8(clampUint16(r) / 256)
+			outPix[outOff+1] = uint8(clampUint16(g) / 256)
+			outPix[outOff+2] = uint8(clampUint16(bv) / 256)
+			outPix[outOff+3] = 0xff
+		}
 	}
-	fx := x - float64(x0)
-	fy := y - float64(y0)
-	r00, g00, b00, _ := src.At(x0, y0).RGBA()
-	r01, g01, b01, _ := src.At(x1, y0).RGBA()
-	r10, g10, b10, _ := src.At(x0, y1).RGBA()
-	r11, g11, b11, _ := src.At(x1, y1).RGBA()
-	r := lerp(lerp(float64(r00), float64(r01), fx), lerp(float64(r10), float64(r11), fx), fy)
-	g := lerp(lerp(float64(g00), float64(g01), fx), lerp(float64(g10), float64(g11), fx), fy)
-	b := lerp(lerp(float64(b00), float64(b01), fx), lerp(float64(b10), float64(b11), fx), fy)
-	return uint8(clampUint16(r) / 256), uint8(clampUint16(g) / 256), uint8(clampUint16(b) / 256)
 }
 
 // solveAffine: 2x3 affine M = [a b c; d e f] s.t. refs[i] = M * srcPts[i].
@@ -660,16 +921,19 @@ func writeAlignedToTensor(src image.Image, dst *ort.Tensor[float32]) error {
 	if len(tData) != 3*ArcFaceInputSize*ArcFaceInputSize {
 		return errors.New("write aligned: tensor buffer size mismatch")
 	}
+	// Direct Pix access — alignFaceTo112 always returns *image.RGBA
+	rgba := src.(*image.RGBA)
+	pix := rgba.Pix
 	stride := ArcFaceInputSize * ArcFaceInputSize
 	for y := 0; y < ArcFaceInputSize; y++ {
 		for x := 0; x < ArcFaceInputSize; x++ {
-			r, g, blu, _ := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			r8 := uint8(r >> 8)
-			g8 := uint8(g >> 8)
-			b8 := uint8(blu >> 8)
-			tData[y*ArcFaceInputSize+x] = (float32(b8)/127.5) - 1.0
-			tData[stride+y*ArcFaceInputSize+x] = (float32(g8)/127.5) - 1.0
-			tData[2*stride+y*ArcFaceInputSize+x] = (float32(r8)/127.5) - 1.0
+			off := (y*rgba.Stride + x*4)
+			r8 := float32(pix[off])   // R
+			g8 := float32(pix[off+1]) // G
+			b8 := float32(pix[off+2]) // B
+			tData[y*ArcFaceInputSize+x] = (b8/127.5) - 1.0
+			tData[stride+y*ArcFaceInputSize+x] = (g8/127.5) - 1.0
+			tData[2*stride+y*ArcFaceInputSize+x] = (r8/127.5) - 1.0
 		}
 	}
 	return nil

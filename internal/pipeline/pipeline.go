@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"log/slog"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/disintegration/imaging"
 
+	"regognition/internal/cache"
 	"regognition/internal/cosine"
 	"regognition/internal/embedder"
 	"regognition/internal/persona"
@@ -31,6 +33,11 @@ import (
 // Job is one image submitted to the worker pool.
 type Job struct {
 	Path string
+	// Img is the pre-decoded image from the Prefetcher.
+	// When non-nil, workers skip imaging.Open and go straight
+	// to inference. When nil (e.g. cache hit), workers should
+	// have cached embeddings available.
+	Img image.Image
 }
 
 // Outcome is the result for one image.
@@ -73,16 +80,19 @@ type Stats struct {
 // non-debug path zero-overhead — the only extra cost is one
 // nil-check per face.
 type Options struct {
-	Workers         int
-	OutputDir       string
-	TargetDimension int
-	Threshold       float32
-	Embedder        embedder.Embedder
-	Persona         *persona.Persona
-	Logger          *slog.Logger
-	Stats           *Stats
-	CopyFile        func(src, dst string) error
-	DebugSink       embedder.DebugSink
+	Workers           int
+	PrefetchBatchSize int // files to read ahead (default 4-8)
+	OutputDir         string
+	TargetDimension   int
+	Threshold         float32
+	Embedder          embedder.Embedder
+	Persona           *persona.Persona
+	Cache             cache.FaceCache // optional: for prefetch cache integration
+	DirSkip           string          // comma-separated folder names to skip
+	Logger            *slog.Logger
+	Stats             *Stats
+	CopyFile          func(src, dst string) error
+	DebugSink         embedder.DebugSink
 }
 
 // Run scans dir, fans out Workers goroutines, and writes matches
@@ -128,7 +138,21 @@ func Run(ctx context.Context, dir string, opt Options) error {
 	}
 	dir = absDir
 
-	paths, err := scanner.Walk(dir)
+	// Parse dir_skip: comma-separated list of folder names to skip.
+	var skipDirs []string
+	if opt.DirSkip != "" {
+		for _, s := range strings.Split(opt.DirSkip, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				skipDirs = append(skipDirs, s)
+			}
+		}
+		if len(skipDirs) > 0 {
+			opt.Logger.Info("skipping directories", "dirs", skipDirs)
+		}
+	}
+
+	paths, err := scanner.WalkWithSkip(dir, skipDirs)
 	if err != nil {
 		return fmt.Errorf("pipeline: scan %q: %w", dir, err)
 	}
@@ -139,28 +163,29 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		return nil
 	}
 
-	// Stage: fan-out.
-	jobs := make(chan Job, len(paths))
-	outcomes := make(chan Outcome, len(paths))
-	for _, p := range paths {
-		jobs <- Job{Path: p}
+	// Stage: prefetcher reads files in batches, decodes images,
+	// and sends them to workers. On slow storage (USB/network HDD),
+	// sequential reads are 5-10x faster than random reads.
+	batchSize := opt.PrefetchBatchSize
+	if batchSize < 1 {
+		batchSize = 4
 	}
-	close(jobs)
+	prefetcher := NewPrefetcher(paths, batchSize, opt.TargetDimension, 2, opt.Cache, opt.Logger)
+
+	// Stage: fan-out workers (CPU only, no disk I/O).
+	outcomes := make(chan Outcome, len(paths))
 
 	var wg sync.WaitGroup
 	for w := 0; w < opt.Workers; w++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for job := range jobs {
+			for job := range prefetcher.Chan() {
 				if ctx.Err() != nil {
-					// Record the rejection then bail — SIGINT should let the
-					// pool drain quickly instead of marking every remaining
-					// job as cancelled.
 					outcomes <- Outcome{Path: job.Path, Err: ctx.Err()}
 					break
 				}
-				outcomes <- processJob(ctx, job, opt)
+				outcomes <- processImageJob(ctx, job, opt)
 			}
 		}(w)
 	}
@@ -168,6 +193,11 @@ func Run(ctx context.Context, dir string, opt Options) error {
 	go func() {
 		wg.Wait()
 		close(outcomes)
+	}()
+
+	// Start prefetcher in background (reads files + decode)
+	go func() {
+		prefetcher.Run(ctx)
 	}()
 
 	// Stage: batch progress reporter. Emits a periodic slog.Info line
@@ -287,6 +317,71 @@ func processJob(ctx context.Context, job Job, opt Options) Outcome {
 		opt.Logger.Debug("extract failed", "path", job.Path, "err", err)
 		return Outcome{Path: job.Path, Err: fmt.Errorf("extract: %w", err)}
 	}
+	opt.Logger.Debug("extract done", "path", job.Path, "faces", len(faces))
+	if len(faces) == 0 {
+		return Outcome{Path: job.Path}
+	}
+	for _, f := range faces {
+		dist, idx := cosine.BestMatch(f, opt.Persona.Embeddings)
+		opt.Logger.Debug("best distance", "path", job.Path, "dist", dist, "persona_idx", idx)
+		if dist <= opt.Threshold {
+			opt.Logger.Info("match", "path", job.Path, "dist", dist)
+			return Outcome{Path: job.Path, Matched: true}
+		}
+	}
+	return Outcome{Path: job.Path}
+}
+
+// processImageJob is like processJob but accepts a pre-decoded image
+// from the Prefetcher. The image is already resized to TargetDimension.
+// This function does ONLY inference + matching (no disk I/O).
+func processImageJob(ctx context.Context, job ImageJob, opt Options) Outcome {
+	if job.Err != nil {
+		opt.Logger.Debug("prefetch failed", "path", job.Path, "err", job.Err)
+		return Outcome{Path: job.Path, Err: job.Err}
+	}
+
+	// Cache hit: embeddings were retrieved by the prefetcher.
+	// Skip inference entirely — just match against persona.
+	if len(job.Embeddings) > 0 {
+		opt.Logger.Debug("cache hit in worker", "path", job.Path, "faces", len(job.Embeddings))
+		for _, f := range job.Embeddings {
+			dist, idx := cosine.BestMatch(f, opt.Persona.Embeddings)
+			opt.Logger.Debug("best distance", "path", job.Path, "dist", dist, "persona_idx", idx)
+			if dist <= opt.Threshold {
+				opt.Logger.Info("match", "path", job.Path, "dist", dist)
+				return Outcome{Path: job.Path, Matched: true}
+			}
+		}
+		return Outcome{Path: job.Path}
+	}
+
+	// Cache miss: run inference on decoded image
+	if job.Img == nil {
+		return Outcome{Path: job.Path}
+	}
+	var faces [][]float32
+	var err error
+	if opt.DebugSink != nil {
+		faces, err = opt.Embedder.ExtractWithDebug(ctx, job.Img, job.Path, opt.DebugSink)
+	} else {
+		faces, err = opt.Embedder.Extract(ctx, job.Img)
+	}
+	if err != nil {
+		opt.Logger.Debug("extract failed", "path", job.Path, "err", err)
+		return Outcome{Path: job.Path, Err: fmt.Errorf("extract: %w", err)}
+	}
+
+	// Store embeddings in cache for future runs (best-effort)
+	if opt.Cache != nil && len(faces) > 0 {
+		hash, hashErr := cache.HashFile(job.Path)
+		if hashErr == nil {
+			if cacheErr := opt.Cache.Set(ctx, job.Path, hash, faces); cacheErr != nil {
+				opt.Logger.Debug("cache: write failed", "path", job.Path, "err", cacheErr)
+			}
+		}
+	}
+
 	opt.Logger.Debug("extract done", "path", job.Path, "faces", len(faces))
 	if len(faces) == 0 {
 		return Outcome{Path: job.Path}

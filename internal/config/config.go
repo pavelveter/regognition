@@ -26,6 +26,7 @@ type Config struct {
 	PersonaDir string // ini: paths.persona_dir | flag: --persona
 	SearchDir  string // ini: paths.dir_search  | flag: --search
 	OutputDir  string // ini: paths.dir_finded  | flag: --out
+	DirSkip    string // ini: paths.dir_skip    | flag: --dir-skip (comma-separated folder names to skip)
 	ConfigPath string // flag: --config (absolute path; resolved by Load)
 
 	// Models
@@ -48,6 +49,10 @@ type Config struct {
 	LandmarkVarianceBaked *bool // ini: ml.landmark_variance_baked
 	// Detector input tensor name. MobileNet: "input.1", ResNet50: "input".
 	DetectorInputName string // ini: ml.detector_input
+	// Execution Providers
+	CoreML bool // ini: ml.coreml | flag: --coreml
+	// Batching
+	ArcBatchSize int // ini: ml.arc_batch_size | flag: --arc-batch-size
 
 	// Pipeline tuning
 	Workers         int     // ini: pipeline.workers         | flag: --workers
@@ -126,6 +131,7 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		cliPersona          = fs.String("persona", "", "persona selfies directory")
 		cliSearch           = fs.String("search", "", "directory to scan for matches")
 		cliOutput           = fs.String("out", "", "directory to copy matched photos to")
+		cliDirSkip          = fs.String("dir-skip", "", "comma-separated folder names to skip during scan")
 		cliWorkers          = fs.Int("workers", 0, "number of pipeline workers")
 		cliThreshold        = fs.Float64("threshold", -1, "cosine distance threshold (matches are <= this)")
 		cliCache            = fs.String("cache", "", "sqlite cache path (empty disables cache)")
@@ -141,6 +147,8 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		cliLogLevel         = fs.String("log-level", "", "minimum log level: debug|info|warn|error (default 'debug'; 'error' = quiet)")
 		cliColor            = fs.String("color", "", "ANSI color usage: auto|always|never (default 'auto')")
 		cliDebug            = fs.Bool("debug", false, "debug mode: force DEBUG log level AND save 112×112 ArcFace-aligned face crops for every match into <out>/debug/, mirroring the search dir structure. Bypasses the embedding cache. Off by default.")
+		cliCoreML           = fs.Bool("coreml", false, "enable CoreML acceleration on macOS (Apple Neural Engine / GPU / CPU)")
+		cliArcBatchSize     = fs.Int("arc-batch-size", 0, "max faces per ArcFace inference call (0 = no batching)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -169,6 +177,9 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if *cliOutput != "" {
 		cfg.OutputDir = *cliOutput
+	}
+	if *cliDirSkip != "" {
+		cfg.DirSkip = *cliDirSkip
 	}
 	if *cliWorkers > 0 {
 		cfg.Workers = *cliWorkers
@@ -214,6 +225,12 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if *cliDebug {
 		cfg.Debug = true
+	}
+	if *cliCoreML {
+		cfg.CoreML = true
+	}
+	if *cliArcBatchSize > 0 {
+		cfg.ArcBatchSize = *cliArcBatchSize
 	}
 
 	// 3. Validation.
@@ -283,6 +300,9 @@ func mergeINI(cfg *Config, f *ini.File) {
 	if v := s.Key("dir_finded").String(); v != "" {
 		cfg.OutputDir = v
 	}
+	if v := s.Key("dir_skip").String(); v != "" {
+		cfg.DirSkip = v
+	}
 
 	// [ml]
 	s = f.Section("ml")
@@ -327,6 +347,12 @@ func mergeINI(cfg *Config, f *ini.File) {
 	}
 	if v := s.Key("detector_input").String(); v != "" {
 		cfg.DetectorInputName = v
+	}
+	if v, err := s.Key("coreml").Bool(); err == nil {
+		cfg.CoreML = v
+	}
+	if v, err := s.Key("arc_batch_size").Int(); err == nil && v > 0 {
+		cfg.ArcBatchSize = v
 	}
 
 	// [pipeline]

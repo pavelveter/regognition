@@ -24,6 +24,7 @@ __debug_*
 # --- Runtime state ------------------------------------------------
 # Output directory: matched photos are copied here by the pipeline
 /matched/
+/finded/
 # Embedding cache (SQLite + WAL-mode sidecars: -shm, -wal, -journal).
 # See internal/cache/face_cache.go for the schema; SQLite is opened
 # in WAL mode so on-disk files are cache.sqlite, cache.sqlite-wal

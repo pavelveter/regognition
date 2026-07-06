@@ -1,43 +1,61 @@
 # regognition
 
-A small Go CLI utility that finds photos of a specific person inside a
-local photo archive. Given 1+ selfies in `persona/` and a photo archive in
-`dir_search`, it copies photos whose faces match the target person into
-`dir_finded`.
+A fast Go CLI utility that finds photos of a specific person inside a
+local photo archive. Given 1+ selfies in `persona/` and a photo archive
+in `dir_search`, it copies photos whose faces match the target person
+into `dir_finded`.
 
-This repository is a **skeleton**: the ML pipeline works end-to-end on a
-deterministic stub embedder so the rest of the project (config, scanner,
-pipeline, CLI) can be exercised and validated. Replace the stub with a
-RetinaFace + ArcFace ONNX implementation when ready.
+Built on **RetinaFace** (face detection) + **ArcFace** (embedding)
+via ONNX Runtime with CoreML acceleration on macOS. Includes a SQLite
+embedding cache and a prefetch I/O pipeline optimized for slow storage.
+
+## Features
+
+- **RetinaFace ResNet50** detector — high-precision face detection with NMS
+- **ArcFace w600k_r50** embedder — 512-d L2-normalized vectors (MR-ALL 91.25)
+- **CoreML EP** — Apple Neural Engine / GPU / CPU fallback on macOS
+- **SQLite embedding cache** — repeat runs skip inference for unchanged files
+- **Prefetch I/O pipeline** — sequential reads + parallel decode, ideal for USB/network drives
+- **Directory skip** — exclude folders by name during scan (`dir_skip`)
+- **Auto-download** — fetches ONNX models from HuggingFace on first run
+- **Debug mode** — saves aligned face crops + per-face distance logs (`--debug`)
 
 ## Project layout
 
 ```
 regognition/
-├── main.go                      # entry point, ties everything together
-├── config.ini.example           # sample INI (copy to ./config.ini)
-├── go.mod
-├── models/                      # drop ONNX files here (currently empty)
-├── TODO.md                      # original blueprint
-└── internal/
-    ├── config/                  # INI + flag loading
-    ├── scanner/                 # recursive image walker
-    ├── persona/                 # persona selfies + embeddings
-    ├── embedder/                # ML abstraction + deterministic stub
-    ├── cosine/                  # cosine distance math
-    └── pipeline/                # channel-based worker pool
+├ main.go                      # entry point, ties everything together
+├ config.ini.example           # sample INI (copy to ./config.ini)
+├ go.mod
+├ models/                      # ONNX weights (auto-downloaded on first run)
+└ internal/
+    ├── assetfetch/             # HTTP model downloader with progress logging
+    ├── cache/                  # SQLite embedding cache + CachedEmbedder
+    ├── config/                 # INI + flag loading
+    ├── cosine/                 # cosine distance math
+    ├── embedder/               # Embedder interface + ONNX + stub impl
+    ├── persona/                # persona selfies + embedding extraction
+    ├── pipeline/               # prefetch I/O pipeline + worker pool
+    ├── prettylog/              # colored slog handler
+    └── scanner/                # recursive image walker
 ```
+
+## Requirements
+
+- Go 1.21+
+- `libonnxruntime.dylib` (macOS) or `.so` (Linux) — auto-detected from `[ml].ort_lib`
+- ONNX models: `retinaface_resnet50.onnx` + `w600k_r50.onnx` (auto-downloaded if missing)
 
 ## Build & run
 
 ```bash
 go mod tidy
-go build ./...
+go build -o regognition .
 
 # Prepare directories (place 1+ selfies in persona/, photos in archive/):
-mkdir -p persona archive finded
+mkdir -p persona archive matched
 
-# Run with default config.ini (or copy from the example):
+# Copy and edit config:
 cp config.ini.example config.ini
 
 ./regognition
@@ -51,177 +69,99 @@ CLI flags always override the INI:
   --search  ./photos_in \
   --out     ./photos_out \
   --workers 8 \
-  --threshold 0.40
+  --threshold 0.65 \
+  --debug
 ```
 
 `--help` lists every flag.
 
-## How the stub works (and how to test the pipeline end-to-end)
+## Configuration
 
-`internal/embedder/stub.go` returns one 512-d L2-normalized vector per
-image, seeded from the central pixel + a deterministic LCG over a
-sampled pixel subset + (optionally) the file path. Identical inputs
-produce identical vectors, so:
+Copy `config.ini.example` to `config.ini` and adjust paths:
 
-1. Drop a single selfie into `persona/`.
-2. Drop the **same** file into `archive/`.
-3. Run `./regognition`.
+```ini
+[paths]
+persona_dir = ./persona
+dir_search  = ./archive
+dir_finded  = ./matched
+dir_skip    = "2. Для печати и дизайна"
 
-The stub will report cosine distance ≈ 0.0 and the file will be copied to
-`finded/`. Two different images will produce non-trivial distance,
-letting you sanity-check the threshold.
+[ml]
+detector_model = ./models/retinaface_resnet50.onnx
+embedder_model = ./models/w600k_r50.onnx
+ort_lib        = ./models/libonnxruntime.dylib
+coreml         = true
+detector_format = concat
 
-## Swapping in real ML
-
-The pipeline only depends on the `embedder.Embedder` interface:
-
-```go
-type Embedder interface {
-    Extract(ctx context.Context, img image.Image) ([][]float32, error)
-    ExtractFile(ctx context.Context, path string) ([][]float32, error)
-    Close() error
-}
+[pipeline]
+workers          = 8
+target_dimension = 1280
+threshold        = 0.65
+det_input_size   = 640
+det_threshold    = 0.5
+nms_iou          = 0.4
+cache_path       = ./cache.sqlite
 ```
 
-An ONNX-backed implementation lives in `internal/embedder/onnx.go`. It
-is selected automatically by `main.go::buildEmbedder` when
-`[ml].ort_lib` points at a working `libonnxruntime.{dylib,so,dll}`
-**and** both detector/embedder model files exist. Otherwise the stub
-runs (with a warning so the fallback is never silent).
+## Models
 
-### Choosing models
+| Model | Path | Source | Size | Notes |
+|-------|------|--------|------|-------|
+| Detector | `models/retinaface_resnet50.onnx` | insightface buffalo_l | ~109 MB | ResNet50, 3-tensor concat format |
+| Embedder | `models/w600k_r50.onnx` | insightface buffalo_l | ~166 MB | ArcFace 512-d, fixed batch=1 |
 
-The shipped pair is the **insightface `buffalo_sc` mobile pack** —
-fast on Apple Silicon and accurate enough for home-photo archives:
+Auto-download fetches from HuggingFace by default. Use `--no-download`
+for air-gapped environments.
 
-| Path | Source model | What it actually is |
-| --- | --- | --- |
-| `models/retinaface_mnet025_v2.onnx` | `det_500m.onnx` from buffalo_sc | RetinaFace MobileNet v0.25 (~5 MB) |
-| `models/arcface_r50_fp16.onnx`     | `w600k_mbf.onnx` from buffalo_sc | **MobileFaceNet**, NOT ResNet-50 (~13 MB) |
-| `models/libonnxruntime.dylib`     | microsoft/onnxruntime v1.26.0 | CPU-only build (CoreML EP available, not enabled) |
+### Detector formats
 
-If you specifically need **ResNet-50 ArcFace** (heavier but more accurate),
-install the `insightface` python package (`pip install insightface` after
-creating a venv to bypass PEP 668), then re-run `FaceAnalysis(name="buffalo_l")`.
-Drop the `w600k_r50.onnx` it produces into `models/arcface_r50_fp16.onnx`,
-and add the matching detector (`scrfd_10g_bnkps.onnx` or similar). The
-decoder/alignment code in `onnx_runtime.go` is shape-agnostic — only the
-ONNX options (output names, channel counts per stride) need to match.
+- `concat` (default) — 3 tensors for ResNet50 (scores/bbox/lmk per stride)
+- `split` — 9 tensors for MobileNet variants
 
-### Verifying input/output names
+### CoreML
 
-If you bring your own ONNX exports you MUST align the names. Open the
-model in **[Netron](https://netron.app)** (also runs as a CLI):
-`netron models/retinaface_mnet025_v2.onnx`. The assumed defaults are
+Set `coreml = true` in `[ml]` to enable Apple Neural Engine / GPU
+acceleration. First run compiles the CoreML model (~45s), subsequent
+runs are fast.
 
-| Kind | Default names (per stride 8/16/32) |
-| --- | --- |
-| detector input  | `input` |
-| detector scores | `face_r8_cls`, `face_r16_cls`, `face_r32_cls` |
-| detector bbox   | `face_r8_bbox`, `face_r16_bbox`, `face_r32_bbox` |
-| detector lmk    | `face_r8_landm`, `face_r16_landm`, `face_r32_landm` |
-| recognizer input / output | `input` / `fc1` |
+## Performance
 
-Override via `ONNXOptions.{DetectorBaseNames,DetectorSuffixes,EmbedderOutputName}`
-when wiring your own models. The implementation assumes 2 anchors per
-cell for the RetinaFace detector — adjust `AnchorsPerCell` (in
-`onnx.go`) for variants with different anchor counts.
+- **Cold run**: ~4–5 img/sec (NVMe, CoreML)
+- **Warm cache**: ~5 img/sec (inference skipped for cached files)
+- **Slow storage**: prefetch pipeline batches reads + parallel decode
 
-### What is currently UNVALIDATED
+The prefetch pipeline reads files in configurable batches (default 4)
+and decodes images in parallel goroutines, keeping workers focused on
+CPU-bound inference. This is critical for USB/network drives where
+random I/O kills throughput.
 
-The ONNX embedder implementation is **structurally complete but only
-vetted by `go build`/`go vet`**; no real-image smoke test has been run
-yet. Known things that may need a touch-up after first real run:
+## Embedding cache
 
-1. **Channel order / mean subtraction** in `preprocessRetinaFace` —
-   the buffer defaults assume BGR with `[104, 117, 123]`. Some PyTorch
-   re-exports use RGB or `(x-127.5)/128`.
-2. **Detector output shapes** are hard-coded for `det_input_size=640`:
-   `(2*A, H, W)`, `(4*A, H, W)`, `(10*A, H, W)` per stride. Different
-   input sizes must mirror the change in the matched stride sizes.
-3. **Recognizer output name** on buffalosc is `embedding`, not `fc1`.
-   It's passed through `ONNXOptions.EmbedderOutputName` — set it in
-   `main.go` if the auto-default fails.
+SQLite-backed cache at `cache.sqlite` (configurable via `cache_path`).
+On repeat runs, files are looked up by path + hash (mtime+size).
+Unchanged files skip RetinaFace+ArcFace entirely — only cosine scoring
+runs. Files with no detected faces are cached too (dominant cost on
+real archives).
 
-The deterministic **stub embedder remains the safe choice** for any
-end-to-end CI or smoke test (drop the same image into `persona/` and
-`archive/`, expect a duplicate in `finded/`).## Roadmap (out of scope for the skeleton)
-
-- Real RetinaFace + ArcFace ONNX embedder (see above).
-- Optional photo-source abstraction (local FS today, smb/WebDAV/Yandex
-  Disk later).
-- Logging via `log/slog` JSON handler for production deployments.
-
-### SQLite embedding cache
-
-A SQLite-backed cache of extracted face embeddings lives in
-`internal/cache/`. When `[pipeline].cache_path` is set and the file
-exists (or can be created), `main.go` wraps the chosen embedder with
-`cache.NewCached`, so:
-
-- The first run over an archive pays the full RetinaFace+ArcFace
-  cost and writes one row per file to `cache.sqlite`.
-- Subsequent runs over the same archive look up each file by `path`
-  and validate the stored `hash` (SHA1 of `path|mtime-nano|size`).
-  Re-running over a directory you haven't touched is effectively
-  free — only the cosine scoring stage runs.
-- Editing, replacing, or mtime-touching a file rebuilds that ONE row
-  (`INSERT OR REPLACE`).
-- Files with **no faces detected** are cached too — they're the
-  dominant cost on real archives (landscapes, pets, scenery).
-
-The cache uses `modernc.org/sqlite` (pure Go, no CGO), WAL journaling,
-and `SetMaxOpenConns(1)` to eliminate `SQLITE_BUSY` between the
-pipeline's workers. Cache write failures are logged as warnings and
-fall back to the freshly extracted embeddings — they never mask a
-result.
-
-Schema (verbatim from `TODO.md` §3):
+Delete `cache.sqlite` to rebuild. Schema:
 
 ```sql
 CREATE TABLE IF NOT EXISTS photo_cache (
-    path       TEXT PRIMARY KEY,
-    hash       TEXT NOT NULL,
+    path        TEXT PRIMARY KEY,
+    hash        TEXT NOT NULL,
     faces_count INTEGER NOT NULL,
-    embeddings BLOB NOT NULL      -- float32 little-endian, EmbedDim*4 bytes per face
+    embeddings  BLOB NOT NULL
 );
 ```
 
-Resize the cache by deleting the file; the schema is recreated on
-the next open. The current build only supports vectors of length512 (the constant `EmbedDim` in `internal/cache/codec.go`); other
-dimensions will require updating that constant plus the codec.
+## Debug mode
 
-### Auto-downloading ONNX models
+`--debug` saves aligned 112×112 face crops under `<output>/debug/` and
+logs per-face detector scores, landmarks, and cosine distances. The
+embedding cache is bypassed in debug mode (fresh inference needed for
+crop extraction).
 
-On startup `main.go` checks both `[ml].detector_model` and
-`[ml].embedder_model` paths. If either is missing **and**
-`[ml].auto_download` is enabled (default: true), the binary fetches
-them from `[ml].detector_model_url` /
-`[ml].embedder_model_url` — by default a HuggingFace mirror of
-insightface's `buffalo_s` pack (the upstream small MobileNet +
-MobileFaceNet weight set), which serves the
-small MobileNet detector and the MobileFaceNet recognizer as raw
-ONNX binary.
+## License
 
-Mechanics (`internal/assetfetch.Ensure`):
-
-- Streams each file with a progress `slog` line every ~2 s.
-- Writes to `dst + ".tmp"`, then atomic-renames on success.
-- Rejects responses that don't begin with the ONNX protobuf header
-  (first byte `0x08`) or fall below a per-file size floor (1 MB for
-  the detector, 5 MB for the recognizer).
-- A previous crashed run leaves no `.tmp` behind — `Ensure` removes
-  it before starting.
-
-Override behaviour:
-
-- `--no-download` on the CLI, or `auto_download = false` in INI, to
-  disable the fetcher for air-gapped runs.
-- `--detector-url` / `--embedder-url`, or `detector_model_url` /
-  `embedder_model_url` in INI, to point at a custom mirror.
-
-Failure to download is **non-fatal**: `buildEmbedder` detects the
-missing file and falls back to the deterministic stub with a warning,
-so a broken network never blocks a run — it just degrades it. 
-
-
+This project is licensed under the GNU General Public License v3.0.
+See [LICENSE](LICENSE) for the full text.

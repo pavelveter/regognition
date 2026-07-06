@@ -107,6 +107,13 @@ type ONNXOptions struct {
 	// Recognizer I/O.
 	EmbedderInputName  string // default "input"
 	EmbedderOutputName string // default "fc1"
+
+	// Execution Providers
+	UseCoreML bool // enable CoreML EP (macOS only)
+
+	// Batching: max faces per ArcFace inference call.
+	// Higher = fewer inference calls, more memory. Default 1 (no batching).
+	ArcBatchSize int
 }
 
 const (
@@ -137,15 +144,22 @@ type sessionPair struct {
 	detSession *ort.AdvancedSession
 	arcSession *ort.AdvancedSession
 	detInput   *ort.Tensor[float32]
-	arcInput   *ort.Tensor[float32]
-	detOuts    []retinaOut // 3 entries (per stride)
-	arcOutput  *ort.Tensor[float32]
+	arcInput   *ort.Tensor[float32] // shape: [batchSize, 3, 112, 112]
+	detOuts    []retinaOut          // 3 entries (per stride)
+	arcOutput  *ort.Tensor[float32] // shape: [batchSize, 512]
+	arcBatchSz int                  // actual batch size used
 
 	// For concat-format detectors (ResNet50): raw output tensors
 	// that need post-inference splitting into detOuts.
 	concatScores *ort.Tensor[float32] // [1, 16800, 2]
 	concatBboxes *ort.Tensor[float32] // [1, 16800, 4]
 	concatLm     *ort.Tensor[float32] // [1, 16800, 10]
+
+	// Pre-allocated split tensors for concat-format detectors.
+	// Reused across calls to avoid per-call allocations.
+	splitScores [3]*ort.Tensor[float32] // [ahw, 1] per stride
+	splitBboxes [3]*ort.Tensor[float32] // [ahw, 4] per stride
+	splitLm     [3]*ort.Tensor[float32] // [ahw, 10] per stride
 }
 
 // ONNXEmbedder is the ONNX-backed Embedder. Built around a buffered
@@ -310,10 +324,30 @@ func (e *ONNXEmbedder) closePoolAndDestroy() {
 // tensors, 1 recognizer input + output, and 2 sessions. Supports both
 // split (9 tensors) and concat (3 tensors) detector output formats.
 func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, error) {
+	// --- Session options (CoreML EP if requested) ---
+	var sessionOpts *ort.SessionOptions
+	if opts.UseCoreML {
+		so, err := ort.NewSessionOptions()
+		if err != nil {
+			return nil, fmt.Errorf("session options: %w", err)
+		}
+		coreMLOpts := map[string]string{
+			"MLComputeUnits": "ALL",
+		}
+		if err := so.AppendExecutionProviderCoreMLV2(coreMLOpts); err != nil {
+			so.Destroy()
+			return nil, fmt.Errorf("coreml ep: %w", err)
+		}
+		sessionOpts = so
+	}
+
 	// --- Detector input ---
 	detInShape := ort.NewShape(int64(1), int64(3), int64(opts.DetInputSize), int64(opts.DetInputSize))
 	detIn, err := ort.NewTensor(detInShape, make([]float32, 3*opts.DetInputSize*opts.DetInputSize))
 	if err != nil {
+		if sessionOpts != nil {
+			sessionOpts.Destroy()
+		}
 		return nil, fmt.Errorf("det input tensor: %w", err)
 	}
 
@@ -321,36 +355,61 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 	var detGroups []retinaOut
 	var detOutputs []ort.Value
 	var concatScores, concatBboxes, concatLm *ort.Tensor[float32]
+	var splitScores [3]*ort.Tensor[float32]
+	var splitBboxes [3]*ort.Tensor[float32]
+	var splitLm [3]*ort.Tensor[float32]
 
 	if opts.DetectorFormat == "concat" {
 		// ResNet50-style: 3 concatenated outputs [1, 16800, C]
 		detSession, concatScores, concatBboxes, concatLm, err = buildConcatSession(
-			detPath, opts, detIn,
+			detPath, opts, detIn, sessionOpts,
 		)
 		if err != nil {
 			detIn.Destroy()
+			if sessionOpts != nil {
+				sessionOpts.Destroy()
+			}
 			return nil, err
 		}
 		// Create per-stride output groups that will be filled after inference
 		detGroups = makeSplitGroups(opts.DetInputSize)
+		// Pre-allocate split tensors for reuse across calls
+		strides := []int{8, 16, 32}
+		for i, s := range strides {
+			hw := opts.DetInputSize / s
+			ahw := AnchorsPerCell * hw * hw
+			splitScores[i], _ = ort.NewEmptyTensor[float32](ort.NewShape(int64(ahw), 1))
+			splitBboxes[i], _ = ort.NewEmptyTensor[float32](ort.NewShape(int64(ahw), 4))
+			splitLm[i], _ = ort.NewEmptyTensor[float32](ort.NewShape(int64(ahw), 10))
+		}
 	} else {
 		// MobileNet-style: 9 split outputs [A*HW, C]
 		if len(opts.DetectorOutputNames) != 9 {
 			detIn.Destroy()
+			if sessionOpts != nil {
+				sessionOpts.Destroy()
+			}
 			return nil, fmt.Errorf("split format requires 9 DetectorOutputNames, got %d", len(opts.DetectorOutputNames))
 		}
 		detSession, detOutputs, detGroups, err = buildSplitSession(
-			detPath, opts, detIn,
+			detPath, opts, detIn, sessionOpts,
 		)
 		if err != nil {
 			detIn.Destroy()
+			if sessionOpts != nil {
+				sessionOpts.Destroy()
+			}
 			return nil, err
 		}
 	}
 
-	// --- Recognizer ---
-	arcInShape := ort.NewShape(int64(1), int64(3), int64(ArcFaceInputSize), int64(ArcFaceInputSize))
-	arcIn, err := ort.NewTensor(arcInShape, make([]float32, 3*ArcFaceInputSize*ArcFaceInputSize))
+	// --- Recognizer (with optional batching) ---
+	batchSz := opts.ArcBatchSize
+	if batchSz < 1 {
+		batchSz = 1
+	}
+	arcInShape := ort.NewShape(int64(batchSz), int64(3), int64(ArcFaceInputSize), int64(ArcFaceInputSize))
+	arcIn, err := ort.NewTensor(arcInShape, make([]float32, batchSz*3*ArcFaceInputSize*ArcFaceInputSize))
 	if err != nil {
 		destroyDetector(detSession, detIn, detOutputs)
 		if concatScores != nil {
@@ -362,9 +421,12 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 		if concatLm != nil {
 			concatLm.Destroy()
 		}
+		if sessionOpts != nil {
+			sessionOpts.Destroy()
+		}
 		return nil, fmt.Errorf("arc input tensor: %w", err)
 	}
-	arcOutShape := ort.NewShape(int64(1), int64(ArcFaceDim))
+	arcOutShape := ort.NewShape(int64(batchSz), int64(ArcFaceDim))
 	arcOut, err := ort.NewEmptyTensor[float32](arcOutShape)
 	if err != nil {
 		destroyDetector(detSession, detIn, detOutputs)
@@ -378,6 +440,9 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 			concatLm.Destroy()
 		}
 		arcIn.Destroy()
+		if sessionOpts != nil {
+			sessionOpts.Destroy()
+		}
 		return nil, fmt.Errorf("arc output tensor: %w", err)
 	}
 	arcSession, err := ort.NewAdvancedSession(
@@ -386,7 +451,7 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 		[]string{opts.EmbedderOutputName},
 		[]ort.Value{arcIn},
 		[]ort.Value{arcOut},
-		nil,
+		sessionOpts,
 	)
 	if err != nil {
 		destroyDetector(detSession, detIn, detOutputs)
@@ -401,7 +466,14 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 		}
 		arcIn.Destroy()
 		arcOut.Destroy()
+		if sessionOpts != nil {
+			sessionOpts.Destroy()
+		}
 		return nil, fmt.Errorf("arc session create: %w", err)
+	}
+	// SessionOptions can be destroyed after all sessions are created
+	if sessionOpts != nil {
+		sessionOpts.Destroy()
 	}
 
 	return &sessionPair{
@@ -411,14 +483,18 @@ func buildSessionPair(detPath, arcPath string, opts ONNXOptions) (*sessionPair, 
 		arcInput:     arcIn,
 		detOuts:      detGroups,
 		arcOutput:    arcOut,
+		arcBatchSz:   batchSz,
 		concatScores: concatScores,
 		concatBboxes: concatBboxes,
 		concatLm:     concatLm,
+		splitScores:  splitScores,
+		splitBboxes:  splitBboxes,
+		splitLm:      splitLm,
 	}, nil
 }
 
 // buildSplitSession creates a detector session with 9 split output tensors.
-func buildSplitSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float32]) (*ort.AdvancedSession, []ort.Value, []retinaOut, error) {
+func buildSplitSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float32], sessionOpts *ort.SessionOptions) (*ort.AdvancedSession, []ort.Value, []retinaOut, error) {
 	const (
 		scoresCh = 1 // already after the model's Sigmoid head
 		boxesCh  = 4
@@ -466,7 +542,7 @@ func buildSplitSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float
 		detOutNames,
 		[]ort.Value{detIn},
 		detOutputs,
-		nil,
+		sessionOpts,
 	)
 	if err != nil {
 		for _, t := range detOutputs {
@@ -480,7 +556,7 @@ func buildSplitSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float
 }
 
 // buildConcatSession creates a detector session with 3 concatenated output tensors.
-func buildConcatSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float32]) (*ort.AdvancedSession, *ort.Tensor[float32], *ort.Tensor[float32], *ort.Tensor[float32], error) {
+func buildConcatSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[float32], sessionOpts *ort.SessionOptions) (*ort.AdvancedSession, *ort.Tensor[float32], *ort.Tensor[float32], *ort.Tensor[float32], error) {
 	totalAnchors := int64(16800) // 12800 + 3200 + 800
 
 	scoresShape := ort.NewShape(1, totalAnchors, 2)
@@ -512,7 +588,7 @@ func buildConcatSession(detPath string, opts ONNXOptions, detIn *ort.Tensor[floa
 		opts.DetectorOutputNames,
 		[]ort.Value{detIn},
 		detOutputs,
-		nil,
+		sessionOpts,
 	)
 	if err != nil {
 		scores.Destroy()
@@ -536,6 +612,7 @@ func makeSplitGroups(detInputSize int) []retinaOut {
 
 // splitConcatOutputs copies data from 3 concat tensors into the 9 per-stride
 // tensors in detOuts. Called after detSession.Run() for concat-format detectors.
+// Uses pre-allocated split tensors to avoid per-call allocations.
 func splitConcatOutputs(sp *sessionPair, opts ONNXOptions) {
 	if sp.concatScores == nil || sp.concatBboxes == nil || sp.concatLm == nil {
 		return
@@ -553,13 +630,10 @@ func splitConcatOutputs(sp *sessionPair, opts ONNXOptions) {
 		ahw := AnchorsPerCell * hw * hw
 		outputSize := hw * hw
 
-		// Allocate per-stride tensors
-		scoresShape := ort.NewShape(int64(ahw), 1)
-		scores, _ := ort.NewEmptyTensor[float32](scoresShape)
-		bboxesShape := ort.NewShape(int64(ahw), 4)
-		bboxes, _ := ort.NewEmptyTensor[float32](bboxesShape)
-		lmShape := ort.NewShape(int64(ahw), 10)
-		lm, _ := ort.NewEmptyTensor[float32](lmShape)
+		// Reuse pre-allocated tensors
+		scores := sp.splitScores[i]
+		bboxes := sp.splitBboxes[i]
+		lm := sp.splitLm[i]
 
 		scoresBuf := scores.GetData()
 		bboxesBuf := bboxes.GetData()
@@ -736,8 +810,13 @@ func (e *ONNXEmbedder) extractWithDebug(ctx context.Context, img image.Image, sr
 	if len(faces) == 0 {
 		return [][]float32{}, nil
 	}
-	// 4. align + recognize each face.
-	out := make([][]float32, 0, len(faces))
+	// 4. align all faces first (collect aligned images).
+	type alignedFace struct {
+		aligned *image.RGBA
+		face    face
+		index   int
+	}
+	var alignedFaces []alignedFace
 	for i, f := range faces {
 		slog.Default().Debug("face pre-align",
 			"i", i,
@@ -751,31 +830,57 @@ func (e *ONNXEmbedder) extractWithDebug(ctx context.Context, img image.Image, sr
 		)
 		aligned, err := alignFaceFromBox(img, f)
 		if err != nil {
-			// Per-face align failure is non-fatal — model can produce
-			// valid-detect but degenerate-affine on weak signals. Skip
-			// this face and continue with the rest. The sink is NOT
-			// called for skipped faces (no embedding to report).
 			slog.Default().Debug("align failed, skipping face",
 				"i", i, "err", err, "score", f.Score)
 			continue
 		}
-		if err := writeAlignedToTensor(aligned, sp.arcInput); err != nil {
-			return nil, fmt.Errorf("write aligned: %w", err)
+		alignedFaces = append(alignedFaces, alignedFace{aligned: aligned, face: f, index: i})
+	}
+	if len(alignedFaces) == 0 {
+		return [][]float32{}, nil
+	}
+	// 5. batch-recognize aligned faces.
+	out := make([][]float32, 0, len(alignedFaces))
+	batchSz := sp.arcBatchSz
+	if batchSz < 1 {
+		batchSz = 1
+	}
+	for start := 0; start < len(alignedFaces); start += batchSz {
+		end := start + batchSz
+		if end > len(alignedFaces) {
+			end = len(alignedFaces)
 		}
+		batch := alignedFaces[start:end]
+		// Write batch to tensor
+		imgs := make([]*image.RGBA, len(batch))
+		for i, af := range batch {
+			imgs[i] = af.aligned
+		}
+		n := writeAlignedBatchToTensor(imgs, sp.arcInput)
+		if n == 0 {
+			continue
+		}
+		// Run ArcFace
 		if err := sp.arcSession.Run(); err != nil {
 			return nil, fmt.Errorf("arcface run: %w", err)
 		}
-		v := append([]float32(nil), sp.arcOutput.GetData()...)
-		l2Normalize(v)
-		out = append(out, v)
-		if sink != nil {
-			sink.OnFace(ctx, srcPath, Face{
-				Embedding: v,
-				BBox:      image.Rect(int(f.X1), int(f.Y1), int(f.X2), int(f.Y2)),
-				Aligned:   aligned,
-				Score:     f.Score,
-				Index:     i,
-			})
+		// Copy outputs
+		outData := sp.arcOutput.GetData()
+		for i := 0; i < n; i++ {
+			start := i * ArcFaceDim
+			end := start + ArcFaceDim
+			v := append([]float32(nil), outData[start:end]...)
+			l2Normalize(v)
+			out = append(out, v)
+			if sink != nil {
+				sink.OnFace(ctx, srcPath, Face{
+					Embedding: v,
+					BBox:      image.Rect(int(batch[i].face.X1), int(batch[i].face.Y1), int(batch[i].face.X2), int(batch[i].face.Y2)),
+					Aligned:   batch[i].aligned,
+					Score:     batch[i].face.Score,
+					Index:     batch[i].index,
+				})
+			}
 		}
 	}
 	return out, nil

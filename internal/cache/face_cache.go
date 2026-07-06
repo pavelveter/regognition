@@ -38,6 +38,10 @@ type FaceCache interface {
 	Get(ctx context.Context, key string) (hash string, faces [][]float32, ok bool, err error)
 	// Set writes/overwrites the (key, hash, faces) tuple.
 	Set(ctx context.Context, key string, hash string, faces [][]float32) error
+	// Has checks if the cache has an entry for key with matching hash.
+	// Returns the cached faces on hit, or (nil, false) on miss.
+	// Faster than Get when callers only need to check existence.
+	Has(ctx context.Context, key string, hash string) (faces [][]float32, ok bool, err error)
 	Close() error
 }
 
@@ -130,6 +134,29 @@ func (s *sqliteCache) Set(ctx context.Context, key, hash string, faces [][]float
 		return fmt.Errorf("cache: set: %w", err)
 	}
 	return nil
+}
+
+// Has implements the FaceCache interface. Checks if the cache has an
+// entry for key with matching hash. Returns faces on hit, (nil, false)
+// on miss. Faster than Get for cache-check-only use cases.
+func (s *sqliteCache) Has(ctx context.Context, key string, hash string) ([][]float32, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT faces_count, embeddings FROM photo_cache WHERE path = ? AND hash = ? LIMIT 1`,
+		key, hash,
+	)
+	var count int64
+	var blob []byte
+	if err := row.Scan(&count, &blob); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("cache: has: %w", err)
+	}
+	faces, err := decodeEmbeddings(blob, int(count))
+	if err != nil {
+		return nil, false, err
+	}
+	return faces, true, nil
 }
 
 // Close implements the FaceCache interface. Idempotent.

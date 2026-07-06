@@ -74,6 +74,8 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (embedder.Embedder, 
 		EmbedderOutputName:   cfg.EmbedderOutputName,
 		DetectorFormat:       cfg.DetectorFormat,
 		LandmarkVarianceBaked: cfg.LandmarkVarianceBaked != nil && *cfg.LandmarkVarianceBaked,
+		UseCoreML:            cfg.CoreML,
+		ArcBatchSize:         cfg.ArcBatchSize,
 	})
 	if err != nil {
 		logger.Error("onnx embedder init failed, falling back to stub", "err", err)
@@ -238,8 +240,10 @@ func run() error {
 	// hit would silently produce no debug output, which is more
 	// confusing than the slowdown. main.go owns this decision so
 	// cache.go stays a pure pass-through wrapper.
+	var fc cache.FaceCache
 	if cfg.CachePath != "" && !cfg.Debug {
-		fc, err := cache.Open(cfg.CachePath)
+		var err error
+		fc, err = cache.Open(cfg.CachePath)
 		if err != nil {
 			return fmt.Errorf("cache open: %w", err)
 		}
@@ -277,7 +281,7 @@ func run() error {
 	}
 
 	// Persona: load selfies + extract embeddings.
-	pers, err := persona.Load(ctx, cfg.PersonaDir, emb, personaDebugSink)
+	pers, err := persona.LoadWithLogger(ctx, cfg.PersonaDir, emb, personaDebugSink, logger)
 	if err != nil {
 		return fmt.Errorf("persona load: %w", err)
 	}
@@ -338,15 +342,18 @@ func run() error {
 	// Pipeline.
 	stats := &pipeline.Stats{}
 	if err := pipeline.Run(ctx, absSearchDir, pipeline.Options{
-		Workers:         cfg.Workers,
-		OutputDir:       cfg.OutputDir,
-		TargetDimension: cfg.TargetDimension,
-		Threshold:       float32(cfg.Threshold),
-		Embedder:        emb,
-		Persona:         pers,
-		Logger:          logger,
-		Stats:           stats,
-		DebugSink:       debugSink,
+		Workers:           cfg.Workers,
+		PrefetchBatchSize: 4,
+		OutputDir:         cfg.OutputDir,
+		TargetDimension:   cfg.TargetDimension,
+		Threshold:         float32(cfg.Threshold),
+		Embedder:          emb,
+		Persona:           pers,
+		Cache:             fc,
+		DirSkip:           cfg.DirSkip,
+		Logger:            logger,
+		Stats:             stats,
+		DebugSink:         debugSink,
 	}); err != nil {
 		return fmt.Errorf("pipeline: %w", err)
 	}

@@ -15,14 +15,17 @@ persona_dir = persona
 ; Archive folder that we scan for photos containing the target person.
 dir_search  = ./archive
 ; Folder where matched photos are copied.
-dir_finded  = ./finded
+dir_finded  = ./matched
+; Skip folders with these names (comma-separated).
+; Example: dir_skip = "2. Для печати и дизайна", "3. Архив"
+dir_skip =
 
 [ml]
 ; ONNX models. When both files exist on disk AND ort_lib is set, main.go
 ; automatically picks the ONNX embedder; otherwise it stays on the
 ; deterministic stub.
-detector_model = ./models/retinaface_mnet025_v2.onnx
-embedder_model = ./models/arcface_r50_fp16.onnx
+detector_model = ./models/retinaface_resnet50.onnx
+embedder_model = ./models/w600k_r50.onnx
 ; Path to the native ONNX Runtime shared library (binary is
 ; platform-dependent). macOS arm64 example below is the v1.26.0 release
 ; from https://github.com/microsoft/onnxruntime/releases.
@@ -41,32 +44,48 @@ detector_model_url = https://huggingface.co/deepghs/insightface/resolve/main/buf
 ; mirror of insightface buffalo_s/w600k_mbf.onnx (MobileFaceNet, IR
 ; version 6, ~13.6 MB).
 embedder_model_url = https://huggingface.co/deepghs/insightface/resolve/main/buffalo_s/w600k_mbf.onnx
+; Detector output format: "split" (9 tensors for MobileNet) or
+; "concat" (3 tensors for ResNet50). Auto-detected if not set.
+detector_format = concat
+; Whether the ONNX export bakes variance[0] into landmark outputs.
+; MobileNet: true (default), ResNet50: false.
+landmark_variance_baked = false
+; Detector input tensor name. MobileNet: "input.1", ResNet50: "input".
+detector_input = input
+; ArcFace embedder output tensor name. arcface_r50_fp16: "516", w600k_r50: "683".
+embedder_output = 683
+; Enable CoreML acceleration on macOS (Apple Neural Engine / GPU / CPU).
+; Falls back to CPU if CoreML is unavailable.
+coreml = true
+; Max faces per ArcFace inference call. Higher = fewer inference calls, more memory.
+; 0 = no batching (default). 16-32 recommended for group photos.
+arc_batch_size = 1
 
 [pipeline]
 ; Number of workers for the channel-parallel archive processor.
-workers       = 4
+workers       = 8
 ; Longest pre-processing edge. Portrait frames land with their longest
 ; side at this value vertically; landscape frames with their longest
 ; side at this value horizontally. Aspect ratio is preserved via
 ; imaging.Fit. 1280 is a good balance of quality and CPU-inference
 ; speed for most archives.
-target_dimension = 1280
+target_dimension  = 1280
 ; Cosine distance threshold. A match is counted when dist <= threshold.
 ; (L2-normalized ArcFace vectors: identity ~0.0, different people ~0.6+.)
-threshold     = 0.45
+threshold     = 0.65
 ; Face-detector parameters (RetinaFace) — active only in ONNX mode.
 det_input_size = 640
-det_threshold = 0.3
+det_threshold = 0.5
 nms_iou       = 0.4
 ; Path to the SQLite embedding cache (comment out / leave empty to disable).
-; cache_path = ./cache.sqlite
+cache_path = ./cache.sqlite
 
 [ui]
 ; Minimum log level: debug | info | warn | error. Default debug — the
 ; program emits per-image events and per-batch progress every ~3 seconds
 ; during the archive scan. Use --log-level=error (or log_level = error)
 ; for quiet mode.
-log_level = debug
+log_level = info
 ; ANSI color usage: auto | always | never. Default auto (TTY autodetect
 ; and respects $NO_COLOR per https://no-color.org/).
 ;color = auto

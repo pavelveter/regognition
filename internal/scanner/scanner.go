@@ -25,12 +25,27 @@ var SupportedExts = map[string]struct{}{
 // The slice is sorted by absolute path. Errors inside the tree are
 // returned but do not abort the walk.
 func Walk(root string) ([]string, error) {
+	return WalkWithSkip(root, nil)
+}
+
+// WalkWithSkip is like Walk but skips directories whose base name
+// matches any entry in skipDirs. skipDirs may be nil to skip nothing.
+func WalkWithSkip(root string, skipDirs []string) ([]string, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, err
 	}
 	if !info.IsDir() {
 		return nil, errors.New("scanner: root is not a directory: " + root)
+	}
+
+	// Build a set for O(1) lookup.
+	skipSet := make(map[string]struct{}, len(skipDirs))
+	for _, name := range skipDirs {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			skipSet[name] = struct{}{}
+		}
 	}
 
 	var paths []string
@@ -43,6 +58,10 @@ func Walk(root string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
+			// Skip directories whose base name is in the skip set.
+			if _, skip := skipSet[d.Name()]; skip {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
