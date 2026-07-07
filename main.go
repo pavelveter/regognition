@@ -207,6 +207,7 @@ func run() error {
 	}()
 	go func() {
 		sig := <-sigCh
+		fmt.Fprintln(os.Stderr)
 		logger.Warn("interrupt received, shutting down gracefully",
 			"signal", sig.String())
 		forceExit.Store(time.AfterFunc(5*time.Second, func() {
