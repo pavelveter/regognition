@@ -17,8 +17,17 @@ dir_search  = ./archive
 ; Folder where matched photos are copied.
 dir_finded  = ./matched
 ; Skip folders with these names (comma-separated).
+; Also supports glob patterns via skip_files below.
 ; Example: dir_skip = "2. Для печати и дизайна", "3. Архив"
 dir_skip =
+; Glob patterns for files to skip (comma-separated, case-insensitive).
+; Uses filepath.Match syntax: ".*" skips dotfiles, "_*" skips macOS resource forks.
+; Example: skip_files = "._*,*.tmp,.DS_Store"
+skip_files = ._*
+; Allowed file extensions (comma-separated, case-insensitive).
+; Leave empty to use the default set (.jpg, .jpeg, .png, .webp).
+; Example: extensions = ".jpg,.jpeg,.png,.webp,.heic"
+extensions =
 
 [ml]
 ; ONNX models. When both files exist on disk AND ort_lib is set, main.go

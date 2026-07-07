@@ -27,6 +27,8 @@ type Config struct {
 	SearchDir  string // ini: paths.dir_search  | flag: --search
 	OutputDir  string // ini: paths.dir_finded  | flag: --out
 	DirSkip    string // ini: paths.dir_skip    | flag: --dir-skip (comma-separated folder names to skip)
+	SkipFiles  string // ini: paths.skip_files  | flag: --skip-files (glob patterns for files to skip, comma-separated)
+	Extensions string // ini: paths.extensions  | flag: --extensions (allowed extensions, comma-separated, e.g. ".jpg,.jpeg,.png")
 	ConfigPath string // flag: --config (absolute path; resolved by Load)
 
 	// Models
@@ -140,6 +142,8 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 		cliSearch         = fs.String("search", "", "directory to scan for matches")
 		cliOutput         = fs.String("out", "", "directory to copy matched photos to")
 		cliDirSkip        = fs.String("dir-skip", "", "comma-separated folder names to skip during scan")
+		cliSkipFiles      = fs.String("skip-files", "", "glob patterns for files to skip (comma-separated, e.g. \"._*,*.tmp\")")
+		cliExtensions     = fs.String("extensions", "", "allowed file extensions (comma-separated, e.g. \".jpg,.jpeg,.png\"); empty = default set")
 		cliWorkers        = fs.Int("workers", 0, "number of pipeline workers")
 		cliThreshold      = fs.Float64("threshold", -1, "cosine distance threshold (matches are <= this)")
 		cliCache          = fs.String("cache", "", "sqlite cache path (empty disables cache)")
@@ -188,6 +192,12 @@ func Load(fs *flag.FlagSet, args []string) (*Config, error) {
 	}
 	if *cliDirSkip != "" {
 		cfg.DirSkip = *cliDirSkip
+	}
+	if *cliSkipFiles != "" {
+		cfg.SkipFiles = *cliSkipFiles
+	}
+	if *cliExtensions != "" {
+		cfg.Extensions = *cliExtensions
 	}
 	if *cliWorkers > 0 {
 		cfg.Workers = *cliWorkers
@@ -310,6 +320,12 @@ func mergeINI(cfg *Config, f *ini.File) {
 	}
 	if v := s.Key("dir_skip").String(); v != "" {
 		cfg.DirSkip = v
+	}
+	if v := s.Key("skip_files").String(); v != "" {
+		cfg.SkipFiles = v
+	}
+	if v := s.Key("extensions").String(); v != "" {
+		cfg.Extensions = v
 	}
 
 	// [ml]

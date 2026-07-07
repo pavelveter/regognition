@@ -358,6 +358,8 @@ func run() error {
 		Cache:             fc,
 		Writer:            bw,
 		DirSkip:           cfg.DirSkip,
+		SkipFiles:         cfg.SkipFiles,
+		Extensions:        cfg.Extensions,
 		Logger:            logger,
 		Stats:             stats,
 		DebugSink:         debugSink,

@@ -90,6 +90,8 @@ type Options struct {
 	Cache             cache.FaceCache      // optional: for prefetch cache integration
 	Writer            *cache.BatchedWriter // optional: batched cache writer (replaces direct Cache.Set)
 	DirSkip           string               // comma-separated folder names to skip
+	SkipFiles         string               // comma-separated glob patterns for files to skip
+	Extensions        string               // comma-separated allowed extensions (empty = default)
 	Logger            *slog.Logger
 	Stats             *Stats
 	CopyFile          func(src, dst string) error
@@ -153,7 +155,44 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		}
 	}
 
-	paths, err := scanner.WalkWithSkip(dir, skipDirs)
+	// Parse skip_files: comma-separated glob patterns for files to skip.
+	var skipFiles []string
+	if opt.SkipFiles != "" {
+		for _, s := range strings.Split(opt.SkipFiles, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				skipFiles = append(skipFiles, s)
+			}
+		}
+		if len(skipFiles) > 0 {
+			opt.Logger.Info("skipping file patterns", "patterns", skipFiles)
+		}
+	}
+
+	// Parse extensions: comma-separated allowed extensions.
+	var extensions []string
+	if opt.Extensions != "" {
+		for _, s := range strings.Split(opt.Extensions, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				// Normalize: ensure leading dot, lowercase.
+				if !strings.HasPrefix(s, ".") {
+					s = "." + s
+				}
+				s = strings.ToLower(s)
+				extensions = append(extensions, s)
+			}
+		}
+		if len(extensions) > 0 {
+			opt.Logger.Info("file extensions filter", "extensions", extensions)
+		}
+	}
+
+	paths, err := scanner.WalkWithOptions(dir, scanner.WalkOptions{
+		SkipDirs:   skipDirs,
+		SkipFiles:  skipFiles,
+		Extensions: extensions,
+	})
 	if err != nil {
 		return fmt.Errorf("pipeline: scan %q: %w", dir, err)
 	}
