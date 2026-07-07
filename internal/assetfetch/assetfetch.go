@@ -131,6 +131,7 @@ func fillOpts(o Options) Options {
 }
 
 // alreadyValid reports whether dst satisfies both MinBytes and Magic.
+// It is a pure predicate — it never mutates filesystem state.
 func alreadyValid(dst string, opts Options) (bool, error) {
 	info, err := os.Stat(dst)
 	if err != nil {
@@ -145,7 +146,6 @@ func alreadyValid(dst string, opts Options) (bool, error) {
 	if opts.MinBytes > 0 && info.Size() < int64(opts.MinBytes) {
 		opts.Logger.Info("re-fetching: existing file too small",
 			"path", dst, "size", info.Size(), "min", opts.MinBytes)
-		_ = os.Remove(dst)
 		return false, nil
 	}
 	if len(opts.Magic) > 0 {
@@ -158,7 +158,6 @@ func alreadyValid(dst string, opts Options) (bool, error) {
 			_ = f.Close()
 			opts.Logger.Info("re-fetching: cannot read existing head bytes",
 				"path", dst, "err", err)
-			_ = os.Remove(dst)
 			return false, nil
 		}
 		_ = f.Close()
@@ -166,7 +165,6 @@ func alreadyValid(dst string, opts Options) (bool, error) {
 			opts.Logger.Info("re-fetching: existing file fails magic check",
 				"path", dst, "want", fmt.Sprintf("%x", opts.Magic),
 				"got", fmt.Sprintf("%x", head))
-			_ = os.Remove(dst)
 			return false, nil
 		}
 	}
@@ -209,6 +207,12 @@ func fetchOne(parent context.Context, dst, url string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("create tmp %q: %w", tmp, err)
 	}
+	// Safety net: if a panic or unhandled error path exits before
+	// the atomic rename, remove the orphaned .tmp file.
+	defer func() {
+		// os.Remove on a non-existent path is a no-op (returns nil).
+		_ = os.Remove(tmp)
+	}()
 
 	tracker := newProgressTracker(opts.Logger, filepath.Base(dst),
 		resp.ContentLength, opts.ProgressEvery)

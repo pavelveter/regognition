@@ -180,21 +180,25 @@ func (s *sqliteCache) SetBatch(ctx context.Context, items []BatchItem) error {
 	if err != nil {
 		return fmt.Errorf("cache: begin batch: %w", err)
 	}
+	// Rollback is a no-op after successful Commit; this guards
+	// against panics or early returns that skip Commit.
+	defer tx.Rollback()
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO photo_cache (path, hash, faces_count, embeddings) VALUES (?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return fmt.Errorf("cache: prepare batch: %w", err)
 	}
 	defer stmt.Close()
 	for _, it := range items {
 		blob := encodeEmbeddings(it.Faces)
 		if _, err := stmt.ExecContext(ctx, it.Path, it.Hash, len(it.Faces), blob); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("cache: batch exec %q: %w", it.Path, err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cache: commit batch: %w", err)
+	}
+	return nil
 }
 
 // Close implements the FaceCache interface. Idempotent.

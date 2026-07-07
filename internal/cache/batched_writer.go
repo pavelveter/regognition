@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const enqueueTimeout = 100 * time.Millisecond
+
 // pendingWrite is one queued cache row.
 type pendingWrite struct {
 	path  string
@@ -56,16 +58,17 @@ func NewBatchedWriter(c FaceCache, logger *slog.Logger, flushN int, flushDur tim
 	return w
 }
 
-// Enqueue is the non-blocking replacement for cache.Set. Best-effort,
-// same as the direct Set call was: a full queue (writer stuck/slow)
-// drops the write with a warning rather than blocking the calling
-// pipeline worker — a cache miss next run is much cheaper than
-// stalling image processing on cache I/O.
+// Enqueue is the non-blocking replacement for cache.Set. Gives the
+// batched writer up to 100ms to accept the entry before dropping it.
+// Inference is too expensive to discard its results over a brief
+// SQLite write stall.
 func (w *BatchedWriter) Enqueue(path, hash string, faces [][]float32) {
+	ctx, cancel := context.WithTimeout(context.Background(), enqueueTimeout)
+	defer cancel()
 	select {
 	case w.in <- pendingWrite{path: path, hash: hash, faces: faces}:
-	default:
-		w.logger.Warn("cache: write queue full, dropping entry", "path", path)
+	case <-ctx.Done():
+		w.logger.Warn("cache: write queue choked, dropping entry to avoid pipeline stall", "path", path)
 	}
 }
 
@@ -79,6 +82,12 @@ func (w *BatchedWriter) loop() {
 		}
 		if err := w.flushBatch(batch); err != nil {
 			w.logger.Warn("cache: batch flush failed", "count", len(batch), "err", err)
+		}
+		// Zero elements to release embedded [][]float32 slices for GC.
+		// batch[:0] alone only changes len — the backing array retains
+		// references to heavy embedding data until overwritten.
+		for i := range batch {
+			batch[i] = pendingWrite{}
 		}
 		batch = batch[:0]
 	}
