@@ -220,6 +220,7 @@ func Run(ctx context.Context, dir string, opt Options) error {
 	// happen rarely and the mutex contention is negligible.
 	var lastDir string
 	var dirMu sync.Mutex
+	dirCh := make(chan string, 64)
 	logDirChange := func(path string) {
 		dir := filepath.Dir(path)
 		if dir == "" {
@@ -229,7 +230,10 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		if dir != lastDir {
 			lastDir = dir
 			dirMu.Unlock()
-			opt.Logger.Info("\033[35m"+dir+"\033[0m")
+			select {
+			case dirCh <- dir:
+			default:
+			}
 		} else {
 			dirMu.Unlock()
 		}
@@ -268,15 +272,34 @@ func Run(ctx context.Context, dir string, opt Options) error {
 	go func(total int) {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
+		ts := func() string { return time.Now().Format("15:04:05") }
 		for {
 			select {
 			case <-progressDone:
-				fmt.Fprintf(os.Stderr, "\r\033[K✓ INFO  done  total=%d  scanned=%d  matched=%d  errors=%d\n",
-					total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
+				fmt.Fprintf(os.Stderr, "\r\033[K%s ✓ INFO  done  total=%d  scanned=%d  matched=%d  errors=%d\n",
+					ts(), total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
 				return
 			case <-ticker.C:
-				fmt.Fprintf(os.Stderr, "\r\033[K✓ INFO  progress  total=%d  scanned=%d  matched=%d  errors=%d",
-					total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
+				// Drain any pending directory transitions.
+				// If a new folder arrived since the last tick, print
+				// newlines + the folder name so the progress line
+				// doesn't collide with the folder log.
+				drained := false
+				for {
+					select {
+					case dir := <-dirCh:
+						if !drained {
+							fmt.Fprint(os.Stderr, "\n")
+							drained = true
+						}
+						fmt.Fprintf(os.Stderr, "%s ✓ INFO  \033[35m%s\033[0m\n", ts(), dir)
+					default:
+						goto doneDrain
+					}
+				}
+			doneDrain:
+				fmt.Fprintf(os.Stderr, "\r\033[K%s ✓ INFO  progress  total=%d  scanned=%d  matched=%d  errors=%d",
+					ts(), total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
 			}
 		}
 	}(len(paths))
