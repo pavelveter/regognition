@@ -215,6 +215,27 @@ func Run(ctx context.Context, dir string, opt Options) error {
 	// Stage: fan-out workers (CPU only, no disk I/O).
 	outcomes := make(chan Outcome, len(paths))
 
+	// Directory transition tracker — shared across workers.
+	// Files come sorted from the prefetcher, so directory changes
+	// happen rarely and the mutex contention is negligible.
+	var lastDir string
+	var dirMu sync.Mutex
+	logDirChange := func(path string) {
+		dir := filepath.Dir(path)
+		if dir == "" {
+			return
+		}
+		dirMu.Lock()
+		if dir != lastDir {
+			lastDir = dir
+			dirMu.Unlock()
+			opt.Logger.Info("entering folder",
+				"folder", "\033[35m"+dir+"\033[0m")
+		} else {
+			dirMu.Unlock()
+		}
+	}
+
 	var wg sync.WaitGroup
 	for w := 0; w < opt.Workers; w++ {
 		wg.Add(1)
@@ -225,6 +246,7 @@ func Run(ctx context.Context, dir string, opt Options) error {
 					outcomes <- Outcome{Path: job.Path, Err: ctx.Err()}
 					break
 				}
+				logDirChange(job.Path)
 				outcomes <- processImageJob(ctx, job, opt)
 			}
 		}(w)
