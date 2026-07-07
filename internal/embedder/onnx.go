@@ -217,6 +217,11 @@ func NewONNX(detPath, arcPath string, opts ONNXOptions) (*ONNXEmbedder, error) {
 		return nil, e.initErr
 	}
 
+	if opts.UseCoreML {
+		slog.Default().Warn("CoreML enabled: first run compiles neural network models, this may take 10-30 seconds. Subsequent runs use cached compiled models.",
+			"workers", opts.Workers)
+	}
+
 	for i := 0; i < opts.Workers; i++ {
 		sp, err := buildSessionPair(detPath, arcPath, opts)
 		if err != nil {
