@@ -229,8 +229,7 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		if dir != lastDir {
 			lastDir = dir
 			dirMu.Unlock()
-			opt.Logger.Info("entering folder",
-				"folder", "\033[35m"+dir+"\033[0m")
+			opt.Logger.Info("\033[35m"+dir+"\033[0m")
 		} else {
 			dirMu.Unlock()
 		}
@@ -272,14 +271,12 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		for {
 			select {
 			case <-progressDone:
+				fmt.Fprintf(os.Stderr, "\r\033[K✓ INFO  done  total=%d  scanned=%d  matched=%d  errors=%d\n",
+					total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
 				return
 			case <-ticker.C:
-				opt.Logger.Info("batch progress",
-					"total", total,
-					"scanned", opt.Stats.Scanned.Load(),
-					"matched", opt.Stats.Matched.Load(),
-					"errors", opt.Stats.Errors.Load(),
-				)
+				fmt.Fprintf(os.Stderr, "\r\033[K✓ INFO  progress  total=%d  scanned=%d  matched=%d  errors=%d",
+					total, opt.Stats.Scanned.Load(), opt.Stats.Matched.Load(), opt.Stats.Errors.Load())
 			}
 		}
 	}(len(paths))
