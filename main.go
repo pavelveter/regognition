@@ -123,6 +123,22 @@ func ensureModels(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 	}
 }
 
+func printBanner() {
+	const (
+		red     = "\033[31m"
+		darkRed = "\033[38;5;124m"
+		reset   = "\033[0m"
+	)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, red+` ███████╗███████╗ ██████╗  ██████╗  ██████╗ ███╗   ██╗██╗████████╗██╗ ██████╗ ███╗   ██╗`+reset)
+	fmt.Fprintln(os.Stderr, red+` ██╔══██║██╔════╝██╔════╝ ██╔═══██╗██╔════╝ ████╗  ██║██║╚══██╔══╝██║██╔═══██╗████╗  ██║`+reset)
+	fmt.Fprintln(os.Stderr, red+` ██████╔╝█████╗  ██║  `+darkRed+`███╗`+red+`██║   ██║██║  ███╗██╔██╗ ██║██║   ██║   ██║██║   ██║██╔██╗ ██║`+reset)
+	fmt.Fprintln(os.Stderr, red+` ██╔══██╗██╔══╝  ██║   `+darkRed+`██║`+red+`██║   ██║██║   ██║██║╚██╗██║██║   ██║   ██║██║   ██║██║ ██╗██║`+reset)
+	fmt.Fprintln(os.Stderr, red+` ██║  ██║███████╗╚██████╔╝╚██████╔╝╚██████╔╝██║ ╚████║██║   ██║   ██║╚██████╔╝██║  ████║`+reset)
+	fmt.Fprintln(os.Stderr, red+` ╚═╝  ╚═╝╚══════╝ ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝`+reset)
+	fmt.Fprintln(os.Stderr)
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "regognition: %v\n", err)
@@ -143,6 +159,7 @@ func run() error {
 		flag.Usage()
 		return err
 	}
+	printBanner()
 	// --debug / [ui] debug = true forces LogLevel to "debug" so the
 	// per-face DEBUG lines (pre-align scores, decode stats, etc.)
 	// become visible. We do this BEFORE creating the logger so the
@@ -163,6 +180,7 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	var interrupted atomic.Bool
 	// Dedicated signal channel for the watchdog log. We do NOT use
 	// `select { case <-sigCh: case <-ctx.Done(): }` because when
 	// SIGINT arrives BOTH channels become ready simultaneously
@@ -180,6 +198,12 @@ func run() error {
 	// entry point where sigCh would otherwise stay registered for
 	// the process lifetime.
 	defer signal.Stop(sigCh)
+	defer func() {
+		if !interrupted.Load() {
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "\033[35mDocumentation: https://github.com/pavelveter/regognition\033[0m")
+		}
+	}()
 	// Force-exit safety net. yalue/onnxruntime_go's Run() is a
 	// blocking cgo C call that does NOT accept context, so once a
 	// worker is in Run() the pipeline can't shut down until the C
@@ -207,11 +231,14 @@ func run() error {
 	}()
 	go func() {
 		sig := <-sigCh
+		interrupted.Store(true)
 		fmt.Fprintln(os.Stderr)
 		logger.Warn("interrupt received, shutting down gracefully",
 			"signal", sig.String())
 		forceExit.Store(time.AfterFunc(5*time.Second, func() {
 			logger.Warn("force exit after 5s shutdown grace period")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "\033[35mDocumentation: https://github.com/pavelveter/regognition\033[0m")
 			os.Exit(130)
 		}))
 	}()
