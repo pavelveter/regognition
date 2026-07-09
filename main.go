@@ -73,7 +73,7 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (embedder.Embedder, 
 		EmbedderInputName:     cfg.EmbedderInputName,
 		EmbedderOutputName:    cfg.EmbedderOutputName,
 		DetectorFormat:        cfg.DetectorFormat,
-		LandmarkVarianceBaked: cfg.LandmarkVarianceBaked != nil && *cfg.LandmarkVarianceBaked,
+		LandmarkVarianceBaked: cfg.LandmarkVarianceBaked, // nil = auto-detect from format
 		UseCoreML:             cfg.CoreML,
 		ArcBatchSize:          cfg.ArcBatchSize,
 	})
@@ -281,7 +281,7 @@ func run() error {
 		// of 200 rows or every 1s, whichever comes first. This
 		// eliminates per-photo SQLite write-lock contention on fresh
 		// cache runs (8 workers no longer serialize on each INSERT).
-		bw = cache.NewBatchedWriter(fc, logger, 200, 1*time.Second)
+		bw = cache.NewBatchedWriter(fc, logger, 200, 1*time.Second, ctx)
 		logger.Info("embedding cache enabled", "path", cfg.CachePath)
 	} else if cfg.CachePath != "" && cfg.Debug {
 		logger.Warn("debug mode: bypassing embedding cache (debug crops require fresh inference)",
@@ -379,18 +379,18 @@ func run() error {
 		Workers:         cfg.Workers,
 		IOWorkers:       cfg.IOWorkers,
 		OutputDir:       cfg.OutputDir,
-		TargetDimension:   cfg.TargetDimension,
-		Threshold:         float32(cfg.Threshold),
-		Embedder:          emb,
-		Persona:           pers,
-		Cache:             fc,
-		Writer:            bw,
-		DirSkip:           cfg.DirSkip,
-		SkipFiles:         cfg.SkipFiles,
-		Extensions:        cfg.Extensions,
-		Logger:            logger,
-		Stats:             stats,
-		DebugSink:         debugSink,
+		TargetDimension: cfg.TargetDimension,
+		Threshold:       float32(cfg.Threshold),
+		Embedder:        emb,
+		Persona:         pers,
+		Cache:           fc,
+		Writer:          bw,
+		DirSkip:         cfg.DirSkip,
+		SkipFiles:       cfg.SkipFiles,
+		Extensions:      cfg.Extensions,
+		Logger:          logger,
+		Stats:           stats,
+		DebugSink:       debugSink,
 	}); err != nil {
 		return fmt.Errorf("pipeline: %w", err)
 	}

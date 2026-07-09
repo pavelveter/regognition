@@ -83,19 +83,19 @@ type Options struct {
 	Workers         int
 	IOWorkers       int // concurrent file reads; tune to your storage (see Prefetcher doc)
 	OutputDir       string
-	TargetDimension   int
-	Threshold         float32
-	Embedder          embedder.Embedder
-	Persona           *persona.Persona
-	Cache             cache.FaceCache      // optional: for prefetch cache integration
-	Writer            *cache.BatchedWriter // optional: batched cache writer (replaces direct Cache.Set)
-	DirSkip           string               // comma-separated folder names to skip
-	SkipFiles         string               // comma-separated glob patterns for files to skip
-	Extensions        string               // comma-separated allowed extensions (empty = default)
-	Logger            *slog.Logger
-	Stats             *Stats
-	CopyFile          func(src, dst string) error
-	DebugSink         embedder.DebugSink
+	TargetDimension int
+	Threshold       float32
+	Embedder        embedder.Embedder
+	Persona         *persona.Persona
+	Cache           cache.FaceCache      // optional: for prefetch cache integration
+	Writer          *cache.BatchedWriter // optional: batched cache writer (replaces direct Cache.Set)
+	DirSkip         string               // comma-separated folder names to skip
+	SkipFiles       string               // comma-separated glob patterns for files to skip
+	Extensions      string               // comma-separated allowed extensions (empty = default)
+	Logger          *slog.Logger
+	Stats           *Stats
+	CopyFile        func(src, dst string) error
+	DebugSink       embedder.DebugSink
 }
 
 // Run scans dir, fans out Workers goroutines, and writes matches
@@ -436,7 +436,7 @@ func processImageJob(ctx context.Context, job ImageJob, opt Options) Outcome {
 
 	// Cache miss: run inference on decoded image
 	if job.Img == nil {
-		return Outcome{Path: job.Path}
+		return Outcome{Path: job.Path, Err: fmt.Errorf("prefetch: nil image without error")}
 	}
 	var faces [][]float32
 	var err error

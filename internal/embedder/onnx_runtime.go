@@ -568,7 +568,11 @@ func writeAlignedBatchToTensor(aligned []*image.RGBA, dst *ort.Tensor[float32]) 
 }
 
 // nmsFaces sorts by score and removes IoU-overlapping lower-scored
-// boxes; returns the survivors.
+// boxes; returns the survivors. O(n²) where n = pre-NMS detections.
+// In practice n is small (10–50) after quality filters (minFacePx,
+// aspect ratio, landmarksInBBox) prune the 16800 raw anchors. If
+// future models produce more surviving detections, consider switching
+// to a sorted-by-score greedy NMS with early termination.
 func nmsFaces(in []face, iouThr float32) []face {
 	if len(in) == 0 {
 		return in

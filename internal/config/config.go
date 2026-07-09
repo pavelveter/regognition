@@ -104,9 +104,10 @@ func Defaults() Config {
 		DetectorLandmName:  "landm",
 		// MobileNet (the shipped retinaface_mnet025_v2 default)
 		// bakes variance[0] into landmark outputs; only ResNet50
-		// exports need this false. Override via
+		// exports need this false. nil = auto-detect from detector
+		// format (concat→false, split→true). Override via
 		// [ml] landmark_variance_baked = false if you swap models.
-		LandmarkVarianceBaked: boolPtr(false),
+		LandmarkVarianceBaked: nil, // auto-detect
 
 		// UI/logging defaults: emit everything by default ("debug" so
 		// the operator sees per-image activity during long runs) and let

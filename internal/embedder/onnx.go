@@ -102,7 +102,8 @@ type ONNXOptions struct {
 	// LandmarkVarianceBaked indicates whether the ONNX export bakes
 	// variance[0] into landmark outputs. MobileNet does (true), ResNet50
 	// does not (false). When false, variance[0] is applied during decode.
-	LandmarkVarianceBaked bool
+	// nil = auto-detect from DetectorFormat (concat→false, split→true).
+	LandmarkVarianceBaked *bool
 
 	// Recognizer I/O.
 	EmbedderInputName  string // default "input"
@@ -301,6 +302,15 @@ func fillONNXOptionDefaults(o *ONNXOptions) {
 				"493", "496", "499", // stride 32
 			}
 		}
+	}
+
+	// Auto-detect LandmarkVarianceBaked from detector format when not
+	// explicitly set. concat → ResNet50 (variance NOT baked), split →
+	// MobileNet (variance baked). This makes the config zero-config
+	// for all known models while preserving the override via INI.
+	if o.LandmarkVarianceBaked == nil {
+		baked := o.DetectorFormat != "concat" // MobileNet=true, ResNet50=false
+		o.LandmarkVarianceBaked = &baked
 	}
 }
 
@@ -640,15 +650,13 @@ func splitConcatOutputs(sp *sessionPair, opts ONNXOptions) {
 		bboxesBuf := bboxes.GetData()
 		lmBuf := lm.GetData()
 
+		// Extract face channel (index 1) from 2-channel confidence
 		for j := 0; j < ahw; j++ {
-			// Extract face channel (index 1) from 2-channel confidence
-			srcIdx := anchorOffset + j
-			scoresBuf[j] = scoresData[srcIdx*2+1] // face channel
-
-			// Copy bbox and landmarks directly
-			copy(bboxesBuf[j*4:(j+1)*4], bboxesData[srcIdx*4:(srcIdx+1)*4])
-			copy(lmBuf[j*10:(j+1)*10], lmData[srcIdx*10:(srcIdx+1)*10])
+			scoresBuf[j] = scoresData[(anchorOffset+j)*2+1]
 		}
+		// Contiguous copies for bboxes (4 floats × ahw) and landmarks (10 floats × ahw)
+		copy(bboxesBuf, bboxesData[anchorOffset*4:(anchorOffset+ahw)*4])
+		copy(lmBuf, lmData[anchorOffset*10:(anchorOffset+ahw)*10])
 
 		sp.detOuts[i].scores = scores
 		sp.detOuts[i].bboxes = bboxes
@@ -808,7 +816,7 @@ func (e *ONNXEmbedder) extractWithDebug(ctx context.Context, img image.Image, sr
 		logTopNCandidates(sp.detOuts, img.Bounds(), 10)
 	}
 	// 3. decode + NMS.
-	faces := decodeRetinaFaces(sp.detOuts, img.Bounds(), e.opts.DetThreshold, e.opts.NMSIoU, e.opts.LandmarkVarianceBaked)
+	faces := decodeRetinaFaces(sp.detOuts, img.Bounds(), e.opts.DetThreshold, e.opts.NMSIoU, *e.opts.LandmarkVarianceBaked)
 	if len(faces) == 0 {
 		return [][]float32{}, nil
 	}

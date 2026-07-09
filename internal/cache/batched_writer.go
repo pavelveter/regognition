@@ -29,6 +29,7 @@ type pendingWrite struct {
 type BatchedWriter struct {
 	cache    FaceCache
 	logger   *slog.Logger
+	ctx      context.Context
 	in       chan pendingWrite
 	done     chan struct{}
 	flushN   int
@@ -42,13 +43,20 @@ type BatchedWriter struct {
 // embeddings (which just get recomputed next run — never silently
 // dropped, since ExtractFile already returned the correct result to
 // the pipeline before the write was even enqueued).
-func NewBatchedWriter(c FaceCache, logger *slog.Logger, flushN int, flushDur time.Duration) *BatchedWriter {
+//
+// ctx controls batch write cancellation — pass a shutdown context so
+// slow SQLite writes (e.g. on network storage) don't block exit.
+func NewBatchedWriter(c FaceCache, logger *slog.Logger, flushN int, flushDur time.Duration, ctx context.Context) *BatchedWriter {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	w := &BatchedWriter{
 		cache:    c,
 		logger:   logger,
+		ctx:      ctx,
 		in:       make(chan pendingWrite, flushN*2),
 		done:     make(chan struct{}),
 		flushN:   flushN,
@@ -115,7 +123,7 @@ func (w *BatchedWriter) flushBatch(batch []pendingWrite) error {
 	for i, pw := range batch {
 		items[i] = BatchItem{Path: pw.path, Hash: pw.hash, Faces: pw.faces}
 	}
-	return w.cache.SetBatch(context.Background(), items)
+	return w.cache.SetBatch(w.ctx, items)
 }
 
 // Close flushes any partial batch and waits for the writer goroutine
