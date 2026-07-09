@@ -58,6 +58,7 @@ type Config struct {
 
 	// Pipeline tuning
 	Workers         int     // ini: pipeline.workers         | flag: --workers
+	IOWorkers       int     // ini: pipeline.io_workers      — concurrent file reads (0 = default 4)
 	TargetDimension int     // ini: pipeline.target_dimension (max-edge cap; aspect ratio preserved)
 	Threshold       float64 // ini: pipeline.threshold       | flag: --threshold
 	DetInputSize    int     // ini: pipeline.det_input_size
@@ -105,7 +106,7 @@ func Defaults() Config {
 		// bakes variance[0] into landmark outputs; only ResNet50
 		// exports need this false. Override via
 		// [ml] landmark_variance_baked = false if you swap models.
-		LandmarkVarianceBaked: boolPtr(true),
+		LandmarkVarianceBaked: boolPtr(false),
 
 		// UI/logging defaults: emit everything by default ("debug" so
 		// the operator sees per-image activity during long runs) and let
@@ -383,6 +384,9 @@ func mergeINI(cfg *Config, f *ini.File) {
 	s = f.Section("pipeline")
 	if v, err := s.Key("workers").Int(); err == nil && v > 0 {
 		cfg.Workers = v
+	}
+	if v, err := s.Key("io_workers").Int(); err == nil && v > 0 {
+		cfg.IOWorkers = v
 	}
 	if v, err := s.Key("target_dimension").Int(); err == nil && v > 0 {
 		cfg.TargetDimension = v

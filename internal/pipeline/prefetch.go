@@ -22,61 +22,59 @@ type ImageJob struct {
 	Err        error       // non-nil if read/decode failed
 }
 
-// Prefetcher reads image files from disk in batches and sends
-// decoded images to a channel for workers to process.
+// Prefetcher reads image files from disk/network in parallel and
+// streams decoded images to a channel as each one finishes — no
+// batch synchronization, so a single slow read never blocks results
+// that are already ready.
 //
-// On slow storage (USB/network HDD), sequential reads are 5-10x
-// faster than random reads. The Prefetcher reads files in small
-// batches (default 4-8) with parallel decode within each batch,
-// keeping the disk busy while workers do CPU-bound inference.
-//
-// The Prefetcher also applies TargetDimension resize, avoiding
-// redundant work in workers.
+// ReadWorkers controls how many files can be in flight at once.
+// Tune this to your storage:
+//   - Local SSD / typical network share (SMB/NFS over LAN): high
+//     concurrency hides per-request latency well. Start at 2-4x your
+//     CPU count and increase while watching throughput/error rate.
+//   - Spinning disk / USB HDD: physical seek cost makes high
+//     concurrency counterproductive. 2-3 is often the sweet spot.
+//   - There is no one right default — that's WHY this is a config
+//     knob now instead of a hardcoded constant.
 type Prefetcher struct {
-	paths         []string
-	batchSize     int
-	targetDim     int
-	outCh         chan ImageJob
-	decodeWorkers int             // goroutines per batch for parallel decode
-	cache         cache.FaceCache // optional: skip I/O for cached images
-	logger        *slog.Logger
+	paths       []string
+	targetDim   int
+	readWorkers int
+	outCh       chan ImageJob
+	cache       cache.FaceCache
+	logger      *slog.Logger
 }
 
-// NewPrefetcher creates a Prefetcher that will read paths in
-// batches of batchSize, decode images in parallel (decodeWorkers
-// goroutines per batch), resize to targetDim if > 0, and send
-// results to a buffered channel.
+// NewPrefetcher creates a Prefetcher. readWorkers < 1 defaults to 4
+// (a conservative middle ground; override via config for your actual
+// storage medium — see Prefetcher doc comment).
 func NewPrefetcher(
 	paths []string,
-	batchSize int,
 	targetDim int,
-	decodeWorkers int,
+	readWorkers int,
 	cache cache.FaceCache,
 	logger *slog.Logger,
 ) *Prefetcher {
-	if batchSize < 1 {
-		batchSize = 4
-	}
-	if decodeWorkers < 1 {
-		decodeWorkers = 2
+	if readWorkers < 1 {
+		readWorkers = 4
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	// Buffer enough to keep workers busy while disk reads happen.
-	// 2x batchSize gives prefetcher a head start.
-	bufSize := batchSize * 2
+	bufSize := readWorkers * 2
 	if bufSize > len(paths) {
 		bufSize = len(paths)
 	}
+	if bufSize < 1 {
+		bufSize = 1
+	}
 	return &Prefetcher{
-		paths:         paths,
-		batchSize:     batchSize,
-		targetDim:     targetDim,
-		decodeWorkers: decodeWorkers,
-		outCh:         make(chan ImageJob, bufSize),
-		cache:         cache,
-		logger:        logger,
+		paths:       paths,
+		targetDim:   targetDim,
+		readWorkers: readWorkers,
+		outCh:       make(chan ImageJob, bufSize),
+		cache:       cache,
+		logger:      logger,
 	}
 }
 
@@ -85,69 +83,42 @@ func (p *Prefetcher) Chan() <-chan ImageJob {
 	return p.outCh
 }
 
-// Run reads all paths in batches and sends decoded images to the
-// output channel. Blocks until all files are processed or ctx is
-// cancelled. Must be called in a goroutine (or before workers start).
+// Run fans out ReadWorkers goroutines pulling from a shared path
+// channel and streams each ImageJob to outCh the instant its own
+// read finishes — no waiting on siblings, no batch boundaries.
+// Blocks until all paths are processed or ctx is cancelled. Must be
+// called in a goroutine (or before workers start draining Chan()).
 func (p *Prefetcher) Run(ctx context.Context) {
 	defer close(p.outCh)
 
-	for start := 0; start < len(p.paths); start += p.batchSize {
-		if ctx.Err() != nil {
-			return
-		}
-		end := start + p.batchSize
-		if end > len(p.paths) {
-			end = len(p.paths)
-		}
-		batch := p.paths[start:end]
-		p.readBatch(ctx, batch)
-	}
-}
-
-// readBatch reads a batch of files in parallel, decodes them,
-// resizes if needed, and sends results to the output channel.
-func (p *Prefetcher) readBatch(ctx context.Context, batch []string) {
-	results := make([]result, len(batch))
-	var wg sync.WaitGroup
-
-	// Limit concurrent decode workers to avoid disk thrashing
-	// on slow storage. More than 2-3 parallel reads on a USB
-	// drive actually hurts throughput due to seeking.
-	sem := make(chan struct{}, p.decodeWorkers)
-
-	for i, path := range batch {
-		wg.Add(1)
-		go func(idx int, filePath string) {
-			defer wg.Done()
-
-			// Acquire semaphore
+	pathCh := make(chan string, p.readWorkers)
+	go func() {
+		defer close(pathCh)
+		for _, path := range p.paths {
 			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case pathCh <- path:
 			case <-ctx.Done():
-				results[idx] = result{path: filePath, err: ctx.Err()}
 				return
 			}
-
-			results[idx] = p.readAndResize(ctx, filePath)
-		}(i, path)
-	}
-
-	wg.Wait()
-
-	// Send results in order to preserve deterministic output
-	for _, r := range results {
-		select {
-		case p.outCh <- ImageJob{
-			Path:       r.path,
-			Img:        r.img,
-			Embeddings: r.embeddings,
-			Err:        r.err,
-		}:
-		case <-ctx.Done():
-			return
 		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < p.readWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range pathCh {
+				r := p.readAndResize(ctx, path)
+				select {
+				case p.outCh <- ImageJob{Path: r.path, Img: r.img, Embeddings: r.embeddings, Err: r.err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // readAndResize reads a single image file, decodes it, and applies

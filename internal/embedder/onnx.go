@@ -280,10 +280,6 @@ func fillONNXOptionDefaults(o *ONNXOptions) {
 		if len(o.DetectorOutputNames) == 0 {
 			o.DetectorOutputNames = []string{"bbox", "confidence", "landmark"}
 		}
-		if !o.LandmarkVarianceBaked {
-			// ResNet50 does NOT bake variance into landmarks
-			o.LandmarkVarianceBaked = false
-		}
 	} else {
 		// MobileNet-style: 9 split outputs
 		if len(o.DetectorBaseNames) == 0 {

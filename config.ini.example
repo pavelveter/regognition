@@ -58,7 +58,7 @@ embedder_model_url = https://huggingface.co/deepghs/insightface/resolve/main/buf
 detector_format = concat
 ; Whether the ONNX export bakes variance[0] into landmark outputs.
 ; MobileNet: true (default), ResNet50: false.
-landmark_variance_baked = true
+landmark_variance_baked = false
 ; Detector input tensor name. MobileNet: "input.1", ResNet50: "input".
 detector_input = input
 ; ArcFace embedder output tensor name. arcface_r50_fp16: "516", w600k_r50: "683".
@@ -73,6 +73,12 @@ arc_batch_size = 1
 [pipeline]
 ; Number of workers for the channel-parallel archive processor.
 workers       = 16
+; Concurrent file reads. Independent from `workers` (CPU/ONNX
+; concurrency) on purpose — network storage wants MORE concurrent
+; reads than you have CPU cores (to hide round-trip latency);
+; spinning/USB disks want FEWER (2-3, to avoid seek thrashing).
+; Default 4 if unset/0.
+io_workers    = 24
 ; Longest pre-processing edge. Portrait frames land with their longest
 ; side at this value vertically; landscape frames with their longest
 ; side at this value horizontally. Aspect ratio is preserved via

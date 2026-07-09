@@ -80,9 +80,9 @@ type Stats struct {
 // non-debug path zero-overhead — the only extra cost is one
 // nil-check per face.
 type Options struct {
-	Workers           int
-	PrefetchBatchSize int // files to read ahead (default 4-8)
-	OutputDir         string
+	Workers         int
+	IOWorkers       int // concurrent file reads; tune to your storage (see Prefetcher doc)
+	OutputDir       string
 	TargetDimension   int
 	Threshold         float32
 	Embedder          embedder.Embedder
@@ -203,14 +203,10 @@ func Run(ctx context.Context, dir string, opt Options) error {
 		return nil
 	}
 
-	// Stage: prefetcher reads files in batches, decodes images,
-	// and sends them to workers. On slow storage (USB/network HDD),
-	// sequential reads are 5-10x faster than random reads.
-	batchSize := opt.PrefetchBatchSize
-	if batchSize < 1 {
-		batchSize = 4
-	}
-	prefetcher := NewPrefetcher(paths, batchSize, opt.TargetDimension, 2, opt.Cache, opt.Logger)
+	// Stage: prefetcher reads files in parallel, decodes images,
+	// and streams them to workers as each read completes.
+	// IOWorkers controls read concurrency — tune to your storage.
+	prefetcher := NewPrefetcher(paths, opt.TargetDimension, opt.IOWorkers, opt.Cache, opt.Logger)
 
 	// Stage: fan-out workers (CPU only, no disk I/O).
 	outcomes := make(chan Outcome, len(paths))

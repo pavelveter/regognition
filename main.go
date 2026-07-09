@@ -376,9 +376,9 @@ func run() error {
 	// Pipeline.
 	stats := &pipeline.Stats{}
 	if err := pipeline.Run(ctx, absSearchDir, pipeline.Options{
-		Workers:           cfg.Workers,
-		PrefetchBatchSize: 4,
-		OutputDir:         cfg.OutputDir,
+		Workers:         cfg.Workers,
+		IOWorkers:       cfg.IOWorkers,
+		OutputDir:       cfg.OutputDir,
 		TargetDimension:   cfg.TargetDimension,
 		Threshold:         float32(cfg.Threshold),
 		Embedder:          emb,
